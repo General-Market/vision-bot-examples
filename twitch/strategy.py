@@ -91,8 +91,48 @@ class LogisticChange:
         scores = []
         for m in markets:
             x = _change_pct(snapshot_by_id.get(m.get("assetId")))
-            # logistic(x) mapped from (0,1) to (-1,+1): 2*sig - 1 = tanh(x/2)
             scores.append(math.tanh(self.gain * x))
+        return scores
+
+
+class Rolling:
+    """History-aware momentum. Weighted sum of rolling pct changes at
+    5m, 15m, 1h, 6h, 24h, shaped by streak length. Expects a feature
+    DataFrame indexed by asset_id (features.extract_features output).
+    """
+
+    name = "rolling"
+    DEFAULT_WEIGHTS = {
+        "change_5m": 0.30,
+        "change_15m": 0.25,
+        "change_1h": 0.20,
+        "change_6h": 0.15,
+        "change_24h": 0.10,
+    }
+
+    def __init__(self, features_df=None, weights: dict | None = None):
+        self.features_df = features_df
+        self.weights = weights or self.DEFAULT_WEIGHTS
+
+    def predict(self, markets, snapshot_by_id):
+        scores = []
+        f = self.features_df
+        for m in markets:
+            aid = m.get("assetId")
+            if f is not None and aid in f.index:
+                row = f.loc[aid]
+                s = sum(
+                    w * float(row.get(col, 0.0)) for col, w in self.weights.items()
+                )
+                streak = float(row.get("streak", 0.0))
+                # Streak acts as confidence multiplier but capped.
+                mult = 1.0 + min(0.5, 0.1 * abs(streak)) * (1 if streak >= 0 else -1) * (1 if s >= 0 else -1)
+                s *= mult
+                scores.append(s / 100.0)
+            else:
+                scores.append(
+                    _change_pct(snapshot_by_id.get(aid)) / 100.0
+                )
         return scores
 
 
@@ -102,7 +142,12 @@ REGISTRY: dict[str, Callable[[], Predictor]] = {
     "momentum": Momentum,
     "contrarian": Contrarian,
     "logistic": LogisticChange,
+    "rolling": Rolling,
 }
+
+# Strategies that require history + features (not zero-arg constructible).
+FEATURE_STRATEGIES = {"rolling", "xgb", "claude", "ensemble"}
+ALL_STRATEGIES = sorted(set(REGISTRY) | FEATURE_STRATEGIES)
 
 
 def make_predictor(name: str) -> Predictor:
@@ -111,6 +156,66 @@ def make_predictor(name: str) -> Predictor:
             f"Unknown strategy {name!r}. Known: {sorted(REGISTRY)}"
         )
     return REGISTRY[name]()
+
+
+def make_predictor_with_features(
+    name: str,
+    features_df=None,
+    xgb_model_path: str | None = None,
+    claude_base: str = "rolling",
+    claude_top_k: int = 20,
+    ensemble_spec: list[tuple[str, float]] | None = None,
+):
+    """Factory for history-aware / ML / LLM predictors that can't be
+    built by a zero-arg constructor."""
+    if name == "rolling":
+        return Rolling(features_df=features_df)
+    if name == "xgb":
+        from xgb_predictor import XGBPredictor
+
+        inner = XGBPredictor(xgb_model_path)
+
+        class _XGBShim:
+            name = "xgb"
+
+            def __init__(self, inner, features_df):
+                self._inner = inner
+                self.features_df = features_df
+
+            def predict(self, markets, snapshot_by_id):
+                return self._inner.predict(
+                    markets, snapshot_by_id, features_df=self.features_df
+                )
+
+        return _XGBShim(inner, features_df)
+    if name == "claude":
+        from claude_predictor import ClaudePredictor
+
+        base = make_predictor_with_features(
+            claude_base,
+            features_df=features_df,
+            xgb_model_path=xgb_model_path,
+        )
+        return ClaudePredictor(
+            base_predictor=base,
+            features_df=features_df,
+            top_k=claude_top_k,
+        )
+    if name == "ensemble":
+        from ensemble import EnsemblePredictor
+
+        spec = ensemble_spec or [("rolling", 0.5), ("xgb", 0.5)]
+        members = [
+            (
+                make_predictor_with_features(
+                    n, features_df=features_df, xgb_model_path=xgb_model_path
+                ),
+                w,
+            )
+            for n, w in spec
+        ]
+        return EnsemblePredictor(members)
+    return make_predictor(name)
 
 
 def picks_from_scores(

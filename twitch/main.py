@@ -11,7 +11,15 @@ from eth_account import Account
 from web3 import Web3
 
 from bitmap import encode_bitmap, hash_bitmap
-from strategy import REGISTRY, make_predictor, pick_summary, picks_from_scores
+from strategy import (
+    ALL_STRATEGIES,
+    FEATURE_STRATEGIES,
+    REGISTRY,
+    make_predictor,
+    make_predictor_with_features,
+    pick_summary,
+    picks_from_scores,
+)
 from vision_bot import VisionBot, _retry_get
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -137,8 +145,29 @@ def cmd_dryrun(args):
     print(f"getBatch({batch_id}): {json.dumps(printable, default=str)}")
 
     n = len(markets)
-    predictor = make_predictor(args.strategy)
     snapshot_by_id = bot.fetch_snapshot(args.source)
+    features_df = None
+    if args.strategy in FEATURE_STRATEGIES:
+        from features import extract_features
+        from history import fetch_history
+
+        asset_ids = [m.get("assetId") for m in markets if m.get("assetId")]
+        print(f"fetching {args.history_hours}h history for {len(asset_ids)} assets…")
+        hist = fetch_history(
+            data_node_url=data_node,
+            asset_ids=asset_ids,
+            hours=args.history_hours,
+        )
+        print(f"  got {len(hist)} rows covering {hist['asset_id'].nunique() if not hist.empty else 0} assets")
+        features_df = extract_features(hist, snapshot_by_id=snapshot_by_id)
+        predictor = make_predictor_with_features(
+            args.strategy,
+            features_df=features_df,
+            xgb_model_path=args.xgb_model,
+            claude_top_k=args.claude_top_k,
+        )
+    else:
+        predictor = make_predictor(args.strategy)
     scores = predictor.predict(markets, snapshot_by_id)
     picks = picks_from_scores(scores, threshold=args.threshold)
 
@@ -202,8 +231,27 @@ def cmd_trade(args):
     print(f"Active batch {batch_id} with {n} markets (on-chain configHash=0x{config_hash.hex()})")
 
     deposit_wei = int(args.deposit * 1e18)
-    predictor = make_predictor(args.strategy)
     snapshot_by_id = bot.fetch_snapshot(args.source)
+    features_df = None
+    if args.strategy in FEATURE_STRATEGIES:
+        from features import extract_features
+        from history import fetch_history
+
+        asset_ids = [m.get("assetId") for m in markets if m.get("assetId")]
+        hist = fetch_history(
+            data_node_url=data_node,
+            asset_ids=asset_ids,
+            hours=args.history_hours,
+        )
+        features_df = extract_features(hist, snapshot_by_id=snapshot_by_id)
+        predictor = make_predictor_with_features(
+            args.strategy,
+            features_df=features_df,
+            xgb_model_path=args.xgb_model,
+            claude_top_k=args.claude_top_k,
+        )
+    else:
+        predictor = make_predictor(args.strategy)
     scores = predictor.predict(markets, snapshot_by_id)
     picks = picks_from_scores(scores, threshold=args.threshold)
     summary = pick_summary(picks)
@@ -231,31 +279,152 @@ def cmd_trade(args):
     sys.exit(0)
 
 
+def cmd_train_xgb(args):
+    from history import fetch_history
+    from xgb_predictor import XGBPredictor
+
+    data_node = cfg("DATA_NODE_URL").rstrip("/")
+    rpc = cfg("RPC_URL")
+    vision_addr = cfg("VISION_ADDRESS")
+    oracles = [u.strip().rstrip("/") for u in cfg("ORACLE_URLS").split(",") if u.strip()]
+
+    key = get_key("train-xgb") if False else Account.create().key.hex()
+    bot = VisionBot(
+        rpc_url=rpc, vision_address=vision_addr,
+        private_key=key, data_node_url=data_node, oracles=oracles,
+    )
+    source = bot.discover_source(args.source)
+    markets = source.get("markets") or []
+    all_ids = [m["assetId"] for m in markets if m.get("assetId")]
+    asset_ids = all_ids[: args.max_assets] if args.max_assets else all_ids
+    print(f"Training XGB on {len(asset_ids)} assets × {args.hours}h history…")
+
+    hist = fetch_history(data_node_url=data_node, asset_ids=asset_ids, hours=args.hours)
+    if hist.empty:
+        print("No history returned. Nothing to train on.")
+        sys.exit(2)
+    print(f"  got {len(hist)} rows over {hist['asset_id'].nunique()} assets")
+
+    predictor = XGBPredictor()
+    stats = predictor.train(hist, save_path=args.out)
+    print(f"Training done: {stats}")
+
+
+def cmd_backtest(args):
+    from history import fetch_history
+    from backtest import walk_forward
+
+    data_node = cfg("DATA_NODE_URL").rstrip("/")
+    rpc = cfg("RPC_URL")
+    vision_addr = cfg("VISION_ADDRESS")
+    oracles = [u.strip().rstrip("/") for u in cfg("ORACLE_URLS").split(",") if u.strip()]
+
+    bot = VisionBot(
+        rpc_url=rpc, vision_address=vision_addr,
+        private_key=Account.create().key.hex(),
+        data_node_url=data_node, oracles=oracles,
+    )
+    source = bot.discover_source(args.source)
+    markets = source.get("markets") or []
+    asset_ids = [m["assetId"] for m in markets if m.get("assetId")][: args.max_assets]
+    print(f"Backtesting {args.strategy} on {len(asset_ids)} assets × {args.hours}h history…")
+
+    hist = fetch_history(data_node_url=data_node, asset_ids=asset_ids, hours=args.hours)
+    if hist.empty:
+        print("No history returned. Cannot backtest.")
+        sys.exit(2)
+
+    def factory():
+        if args.strategy in FEATURE_STRATEGIES:
+            return make_predictor_with_features(
+                args.strategy,
+                features_df=None,  # walk_forward builds features per tick
+                xgb_model_path=args.xgb_model,
+            )
+        return make_predictor(args.strategy)
+
+    stats = walk_forward(hist, factory)
+    print(f"Backtest: {stats}")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="vision-bot")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("probe")
 
+    for sub_parser in []:
+        pass
+
+    def _add_strategy_args(p):
+        p.add_argument(
+            "--strategy",
+            default="momentum",
+            choices=ALL_STRATEGIES,
+        )
+        p.add_argument("--threshold", type=float, default=0.0)
+        p.add_argument(
+            "--history-hours",
+            type=int,
+            default=6,
+            help="Hours of history to fetch for feature-based strategies.",
+        )
+        p.add_argument(
+            "--xgb-model",
+            default=os.getenv("XGB_MODEL_PATH", "models/xgb.pkl"),
+            help="Path to trained XGBoost model (for --strategy xgb/ensemble/claude).",
+        )
+        p.add_argument(
+            "--claude-top-k",
+            type=int,
+            default=20,
+            help="How many marginal picks Claude gets to override.",
+        )
+
     p_dry = sub.add_parser("dryrun")
     p_dry.add_argument("--source", default="twitch")
     p_dry.add_argument("--deposit", type=float, default=0.1)
-    p_dry.add_argument(
-        "--strategy",
-        default="momentum",
-        choices=sorted(REGISTRY.keys()),
-    )
-    p_dry.add_argument("--threshold", type=float, default=0.0)
+    _add_strategy_args(p_dry)
 
     p_trade = sub.add_parser("trade")
     p_trade.add_argument("--source", default="twitch")
     p_trade.add_argument("--deposit", type=float, required=True)
-    p_trade.add_argument(
-        "--strategy",
-        default="momentum",
-        choices=sorted(REGISTRY.keys()),
+    _add_strategy_args(p_trade)
+
+    p_train = sub.add_parser("train-xgb")
+    p_train.add_argument("--source", default="twitch")
+    p_train.add_argument(
+        "--hours",
+        type=int,
+        default=168,
+        help="Hours of history to pull (data-node retains ~24 days).",
     )
-    p_trade.add_argument("--threshold", type=float, default=0.0)
+    p_train.add_argument("--out", default="models/xgb.pkl")
+    p_train.add_argument(
+        "--max-assets",
+        type=int,
+        default=0,
+        help="Cap on assets (0 = use all).",
+    )
+
+    p_bt = sub.add_parser("backtest")
+    p_bt.add_argument("--source", default="twitch")
+    p_bt.add_argument("--hours", type=int, default=6)
+    p_bt.add_argument(
+        "--strategy",
+        default="rolling",
+        choices=ALL_STRATEGIES,
+    )
+    p_bt.add_argument(
+        "--xgb-model",
+        default=os.getenv("XGB_MODEL_PATH", "models/xgb.pkl"),
+    )
+    p_bt.add_argument(
+        "--max-assets",
+        type=int,
+        default=100,
+        help="Cap on assets used for backtest (full 8k is slow).",
+    )
 
     args = parser.parse_args()
     if args.cmd == "probe":
@@ -264,6 +433,10 @@ def main():
         cmd_dryrun(args)
     elif args.cmd == "trade":
         cmd_trade(args)
+    elif args.cmd == "train-xgb":
+        cmd_train_xgb(args)
+    elif args.cmd == "backtest":
+        cmd_backtest(args)
 
 
 if __name__ == "__main__":
