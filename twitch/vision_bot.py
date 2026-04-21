@@ -95,21 +95,73 @@ class VisionBot:
             f"Available: {sorted({b.get('sourceId','?') for b in all_batches})}"
         )
 
-    def find_active_batch_id(self, config_hash: bytes) -> int:
+    def fetch_snapshot(self, source_id: str = "twitch") -> dict[str, dict]:
+        """Return a map assetId -> snapshot row for the named source.
+        Powers the numerical predictors (changePct, value, etc.).
+
+        `?source=` is required on the data-node — without it the endpoint
+        returns a mixed-source sample of 10k rows and twitch is capped at
+        ~500 (the default per-source sample ceiling).
+        """
+        r = _retry_get(
+            f"{self.data_node_url}/vision/snapshot?source={source_id}",
+            timeout=20,
+        )
+        if r.status_code != 200:
+            raise RuntimeError(
+                f"data-node /vision/snapshot status={r.status_code} body={r.text[:300]}"
+            )
+        rows = r.json().get("snapshots", [])
+        return {row["assetId"]: row for row in rows if row.get("assetId")}
+
+    def find_active_batch_id(
+        self,
+        config_hash: bytes,
+        tick_duration: int | None = None,
+    ) -> tuple[int, bytes]:
+        """Return (batch_id, on_chain_config_hash) for the live batch.
+
+        Prefers an exact configHash match with what the data-node proposed.
+        On a rotation race (data-node has already moved to the next config
+        but the chain hasn't caught up), falls back to the freshest
+        unpaused/unsettled batch with the same tick_duration — and returns
+        that batch's chain-recorded configHash, which is the one the join
+        transaction must reference.
+        """
         target = "0x" + config_hash.hex()
+        same_tick: list[dict] = []
         for url in self.oracles:
             try:
                 r = requests.get(f"{url}/vision/batches", timeout=10)
                 if r.status_code != 200:
                     continue
-                for b in r.json().get("batches", []):
+                batches = r.json().get("batches", [])
+                for b in batches:
                     if b.get("config_hash", "").lower() == target.lower():
-                        return int(b["id"])
+                        return int(b["id"]), config_hash
+                if tick_duration is not None:
+                    for b in batches:
+                        if (
+                            int(b.get("tick_duration", -1)) == int(tick_duration)
+                            and not b.get("paused", False)
+                            and not b.get("settled", False)
+                        ):
+                            same_tick.append(b)
+                if same_tick:
+                    break
             except requests.RequestException:
                 continue
-        raise RuntimeError(
-            f"No active batch found for configHash={target}. "
-            f"The oracle's /vision/batches did not return a match."
+        if not same_tick:
+            raise RuntimeError(
+                f"No active batch found for configHash={target} "
+                f"(tick_duration={tick_duration}). The oracle's "
+                f"/vision/batches did not return a match."
+            )
+        same_tick.sort(key=lambda b: int(b["id"]), reverse=True)
+        top = same_tick[0]
+        return (
+            int(top["id"]),
+            bytes.fromhex(top["config_hash"][2:]),
         )
 
     # ── tx build helpers ──

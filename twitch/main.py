@@ -11,6 +11,7 @@ from eth_account import Account
 from web3 import Web3
 
 from bitmap import encode_bitmap, hash_bitmap
+from strategy import REGISTRY, make_predictor, pick_summary, picks_from_scores
 from vision_bot import VisionBot, _retry_get
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -123,9 +124,10 @@ def cmd_dryrun(args):
 
     config_hash_hex = source["configHash"]
     config_hash = bytes.fromhex(config_hash_hex[2:] if config_hash_hex.startswith("0x") else config_hash_hex)
+    tick = int(source.get("tickDurationSecs") or 0)
 
-    batch_id = bot.find_active_batch_id(config_hash)
-    print(f"batch_id: {batch_id}")
+    batch_id, config_hash = bot.find_active_batch_id(config_hash, tick_duration=tick)
+    print(f"batch_id: {batch_id}  (on-chain configHash=0x{config_hash.hex()})")
     batch = bot.get_batch(batch_id)
     printable = dict(batch)
     for k in ("source_id", "config_hash"):
@@ -135,7 +137,26 @@ def cmd_dryrun(args):
     print(f"getBatch({batch_id}): {json.dumps(printable, default=str)}")
 
     n = len(markets)
-    picks = ["UP"] * n
+    predictor = make_predictor(args.strategy)
+    snapshot_by_id = bot.fetch_snapshot(args.source)
+    scores = predictor.predict(markets, snapshot_by_id)
+    picks = picks_from_scores(scores, threshold=args.threshold)
+
+    summary = pick_summary(picks)
+    print(
+        f"strategy: {predictor.name}  threshold={args.threshold}  "
+        f"snapshot_rows={len(snapshot_by_id)}  picks={summary}"
+    )
+    # Show the 5 strongest signals in each direction so the user
+    # can sanity-check what the bot is actually betting on.
+    ranked = sorted(
+        zip(markets, scores), key=lambda t: t[1], reverse=True
+    )
+    strongest_up = [(m["assetId"], s) for m, s in ranked[:5] if s > args.threshold]
+    strongest_down = [(m["assetId"], s) for m, s in ranked[-5:] if s <= args.threshold]
+    print(f"top UP   : {strongest_up}")
+    print(f"top DOWN : {strongest_down}")
+
     bitmap = encode_bitmap(picks, n)
     bmhash = hash_bitmap(bitmap)
     print(f"bitmap length: {len(bitmap)}")
@@ -175,12 +196,18 @@ def cmd_trade(args):
     n = len(markets)
     config_hash_hex = source["configHash"]
     config_hash = bytes.fromhex(config_hash_hex[2:] if config_hash_hex.startswith("0x") else config_hash_hex)
+    tick = int(source.get("tickDurationSecs") or 0)
 
-    batch_id = bot.find_active_batch_id(config_hash)
-    print(f"Active batch {batch_id} with {n} markets")
+    batch_id, config_hash = bot.find_active_batch_id(config_hash, tick_duration=tick)
+    print(f"Active batch {batch_id} with {n} markets (on-chain configHash=0x{config_hash.hex()})")
 
     deposit_wei = int(args.deposit * 1e18)
-    picks = ["UP"] * n
+    predictor = make_predictor(args.strategy)
+    snapshot_by_id = bot.fetch_snapshot(args.source)
+    scores = predictor.predict(markets, snapshot_by_id)
+    picks = picks_from_scores(scores, threshold=args.threshold)
+    summary = pick_summary(picks)
+    print(f"strategy: {predictor.name}  picks={summary}")
     bitmap = encode_bitmap(picks, n)
     bmhash = hash_bitmap(bitmap)
 
@@ -213,10 +240,22 @@ def main():
     p_dry = sub.add_parser("dryrun")
     p_dry.add_argument("--source", default="twitch")
     p_dry.add_argument("--deposit", type=float, default=0.1)
+    p_dry.add_argument(
+        "--strategy",
+        default="momentum",
+        choices=sorted(REGISTRY.keys()),
+    )
+    p_dry.add_argument("--threshold", type=float, default=0.0)
 
     p_trade = sub.add_parser("trade")
     p_trade.add_argument("--source", default="twitch")
     p_trade.add_argument("--deposit", type=float, required=True)
+    p_trade.add_argument(
+        "--strategy",
+        default="momentum",
+        choices=sorted(REGISTRY.keys()),
+    )
+    p_trade.add_argument("--threshold", type=float, default=0.0)
 
     args = parser.parse_args()
     if args.cmd == "probe":
