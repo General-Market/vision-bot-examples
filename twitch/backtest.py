@@ -20,18 +20,20 @@ def _score_to_prob(score: float) -> float:
 def walk_forward(
     history: pd.DataFrame,
     predictor_factory: Callable[[], object],
+    markets_by_id: dict[str, dict] | None = None,
     min_history: int = 5,
 ) -> dict:
-    """Backtest a predictor against per-asset history.
+    """Backtest a predictor against per-asset history using the same
+    resolution rule the oracle applies.
 
-    For each (asset, tick_i) with i >= min_history and i < len-1:
-      features from [0..i], predict score, compare to sign(value[i+1] - value[i]).
-
-    `predictor_factory` builds a fresh predictor per backtest — the
-    caller is responsible for preloading it if it depends on a saved
-    model.
+    Label at tick i = compute_label(value[i+1], baseline[i+1], res_type, bps)
+    where baseline is the value 24 h earlier (or the earliest available).
+    Without `markets_by_id`, falls back to naive direction labels —
+    but the two paths answer different questions.
     """
-    from features import extract_features
+    from features import compute_label, extract_features
+
+    markets_by_id = markets_by_id or {}
 
     preds: list[int] = []
     probs: list[float] = []
@@ -49,6 +51,8 @@ def walk_forward(
         if hasattr(pred, "base"):
             _set_features(pred.base, feat)
 
+    flips_correct: list[int] = []
+    stuck_correct: list[int] = []
     for asset_id, g in history.groupby("asset_id", sort=False):
         g = g.sort_values("ts").reset_index(drop=True)
         if len(g) < min_history + 2:
@@ -57,7 +61,9 @@ def walk_forward(
             cut = g.iloc[: i + 1]
             now_ts = cut["ts"].iloc[-1]
             try:
-                feat = extract_features(cut, now=now_ts)
+                feat = extract_features(
+                    cut, now=now_ts, markets_by_id=markets_by_id
+                )
             except Exception:
                 continue
             _set_features(predictor, feat)
@@ -79,11 +85,27 @@ def walk_forward(
             this_val = float(g["value"].iloc[i])
             if this_val == 0 or not np.isfinite(this_val):
                 continue
-            truth = 1 if next_val > this_val else 0
+
+            market = markets_by_id.get(asset_id, {})
+            res_type = market.get("resolutionType")
+            bps = market.get("thresholdBps")
+
+            if res_type and bps is not None and asset_id in feat.index:
+                baseline = float(feat.loc[asset_id, "baseline_24h"])
+                truth = compute_label(next_val, baseline, res_type, bps)
+                current_yes = compute_label(this_val, baseline, res_type, bps)
+            else:
+                truth = 1 if next_val > this_val else 0
+                current_yes = 1 if float(g["change_pct"].iloc[i]) > 0 else 0
 
             preds.append(pred)
             probs.append(p_up)
             truths.append(truth)
+
+            if current_yes != truth:
+                flips_correct.append(1 if pred == truth else 0)
+            else:
+                stuck_correct.append(1 if pred == truth else 0)
 
     if not preds:
         return {
@@ -93,6 +115,12 @@ def walk_forward(
             "direction_up_rate": float("nan"),
         }
 
+    flip_acc = (
+        float(np.mean(flips_correct)) if flips_correct else float("nan")
+    )
+    stuck_acc = (
+        float(np.mean(stuck_correct)) if stuck_correct else float("nan")
+    )
     acc = float(np.mean([p == t for p, t in zip(preds, truths)]))
     ll = float(
         -np.mean(
@@ -107,4 +135,8 @@ def walk_forward(
         "accuracy": acc,
         "log_loss": ll,
         "direction_up_rate": float(np.mean(truths)),
+        "flip_accuracy": flip_acc,
+        "stuck_accuracy": stuck_acc,
+        "n_flips": len(flips_correct),
+        "n_stuck": len(stuck_correct),
     }

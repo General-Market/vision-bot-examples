@@ -147,11 +147,12 @@ def cmd_dryrun(args):
     n = len(markets)
     snapshot_by_id = bot.fetch_snapshot(args.source)
     features_df = None
+    markets_by_id = {m["assetId"]: m for m in markets if m.get("assetId")}
     if args.strategy in FEATURE_STRATEGIES:
         from features import extract_features
         from history import fetch_history
 
-        asset_ids = [m.get("assetId") for m in markets if m.get("assetId")]
+        asset_ids = list(markets_by_id.keys())
         print(f"fetching {args.history_hours}h history for {len(asset_ids)} assets…")
         hist = fetch_history(
             data_node_url=data_node,
@@ -159,12 +160,17 @@ def cmd_dryrun(args):
             hours=args.history_hours,
         )
         print(f"  got {len(hist)} rows covering {hist['asset_id'].nunique() if not hist.empty else 0} assets")
-        features_df = extract_features(hist, snapshot_by_id=snapshot_by_id)
+        features_df = extract_features(
+            hist,
+            snapshot_by_id=snapshot_by_id,
+            markets_by_id=markets_by_id,
+        )
         predictor = make_predictor_with_features(
             args.strategy,
             features_df=features_df,
             xgb_model_path=args.xgb_model,
             claude_top_k=args.claude_top_k,
+            markets_by_id=markets_by_id,
         )
     else:
         predictor = make_predictor(args.strategy)
@@ -233,22 +239,27 @@ def cmd_trade(args):
     deposit_wei = int(args.deposit * 1e18)
     snapshot_by_id = bot.fetch_snapshot(args.source)
     features_df = None
+    markets_by_id = {m["assetId"]: m for m in markets if m.get("assetId")}
     if args.strategy in FEATURE_STRATEGIES:
         from features import extract_features
         from history import fetch_history
 
-        asset_ids = [m.get("assetId") for m in markets if m.get("assetId")]
         hist = fetch_history(
             data_node_url=data_node,
-            asset_ids=asset_ids,
+            asset_ids=list(markets_by_id.keys()),
             hours=args.history_hours,
         )
-        features_df = extract_features(hist, snapshot_by_id=snapshot_by_id)
+        features_df = extract_features(
+            hist,
+            snapshot_by_id=snapshot_by_id,
+            markets_by_id=markets_by_id,
+        )
         predictor = make_predictor_with_features(
             args.strategy,
             features_df=features_df,
             xgb_model_path=args.xgb_model,
             claude_top_k=args.claude_top_k,
+            markets_by_id=markets_by_id,
         )
     else:
         predictor = make_predictor(args.strategy)
@@ -295,7 +306,8 @@ def cmd_train_xgb(args):
     )
     source = bot.discover_source(args.source)
     markets = source.get("markets") or []
-    all_ids = [m["assetId"] for m in markets if m.get("assetId")]
+    markets_by_id = {m["assetId"]: m for m in markets if m.get("assetId")}
+    all_ids = list(markets_by_id.keys())
     asset_ids = all_ids[: args.max_assets] if args.max_assets else all_ids
     print(f"Training XGB on {len(asset_ids)} assets × {args.hours}h history…")
 
@@ -306,7 +318,13 @@ def cmd_train_xgb(args):
     print(f"  got {len(hist)} rows over {hist['asset_id'].nunique()} assets")
 
     predictor = XGBPredictor()
-    stats = predictor.train(hist, save_path=args.out)
+    stats = predictor.train(
+        hist,
+        save_path=args.out,
+        markets_by_id={
+            k: v for k, v in markets_by_id.items() if k in asset_ids
+        },
+    )
     print(f"Training done: {stats}")
 
 
@@ -326,7 +344,8 @@ def cmd_backtest(args):
     )
     source = bot.discover_source(args.source)
     markets = source.get("markets") or []
-    asset_ids = [m["assetId"] for m in markets if m.get("assetId")][: args.max_assets]
+    markets_by_id = {m["assetId"]: m for m in markets if m.get("assetId")}
+    asset_ids = list(markets_by_id.keys())[: args.max_assets]
     print(f"Backtesting {args.strategy} on {len(asset_ids)} assets × {args.hours}h history…")
 
     hist = fetch_history(data_node_url=data_node, asset_ids=asset_ids, hours=args.hours)
@@ -343,7 +362,11 @@ def cmd_backtest(args):
             )
         return make_predictor(args.strategy)
 
-    stats = walk_forward(hist, factory)
+    stats = walk_forward(
+        hist,
+        factory,
+        markets_by_id={k: v for k, v in markets_by_id.items() if k in asset_ids},
+    )
     print(f"Backtest: {stats}")
 
 

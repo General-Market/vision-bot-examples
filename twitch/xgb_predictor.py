@@ -16,10 +16,16 @@ import numpy as np
 import pandas as pd
 
 FEATURE_COLS = [
-    "change_5m", "change_15m", "change_1h", "change_6h", "change_24h",
-    "vol_1h", "vol_24h", "slope_1h", "streak", "n_obs_24h",
+    "change_1m", "change_5m", "change_15m",
+    "vol_5m", "slope_5m", "streak", "n_obs_5m",
+    "hour_utc", "day_of_week", "is_weekend", "is_primetime",
+    "dist_to_up", "dist_to_down",
+    "category_mean_5m", "asset_vs_category_5m",
     "current_change_pct",
 ]
+# `current_resolution` is intentionally EXCLUDED from features — over
+# a 60s tick the 24h baseline barely shifts, so the current resolution
+# is almost identical to the next-tick label. Using it leaks the target.
 
 
 def _streak_series(chg: pd.Series) -> pd.Series:
@@ -41,15 +47,23 @@ def _streak_series(chg: pd.Series) -> pd.Series:
 
 
 def build_training_set(
-    history: pd.DataFrame, horizon_minutes: int = 1
+    history: pd.DataFrame,
+    markets_by_id: dict[str, dict] | None = None,
 ) -> tuple[pd.DataFrame, pd.Series]:
-    """Vectorised: per-asset time-indexed rolling ops. For each observed
-    tick t, features describe the series up to t; label is the direction
-    of the NEXT tick's value.
+    """Vectorised per-asset rolling features + resolution-rule labels.
 
-    Features: change_{5m,15m,1h,6h,24h}, vol_{1h,24h}, slope_1h, streak,
-    n_obs_24h, current_change_pct.
+    Features describe the series up to tick t using short windows only
+    (1m / 5m / 15m) plus temporal context and distance-to-threshold.
+    Label is the actual resolution at tick t+1: would the oracle mark
+    this market YES given the value at t+1 vs the 24h baseline?
+
+    `markets_by_id` supplies each asset's resolution rule
+    (`resolutionType` + `thresholdBps`). Without it, labels fall back to
+    naive direction (old behaviour).
     """
+    from features import compute_label
+
+    markets_by_id = markets_by_id or {}
     frames: list[pd.DataFrame] = []
 
     for asset_id, g in history.groupby("asset_id", sort=False):
@@ -60,9 +74,6 @@ def build_training_set(
         value = g["value"].astype(float)
         chg = g["change_pct"].astype(float)
 
-        # Rolling % change: compare current value to the first value
-        # observed inside the `[t - window, t]` window. Robust to
-        # uneven sampling — no requirement for an exact t-window sample.
         def pct(window: str) -> pd.Series:
             start = value.rolling(window).apply(
                 lambda v: v.iloc[0] if len(v) else np.nan, raw=False
@@ -70,52 +81,104 @@ def build_training_set(
             return (value - start) / start.replace(0, np.nan) * 100.0
 
         feat = pd.DataFrame(index=value.index)
+        feat["change_1m"] = pct("1min")
         feat["change_5m"] = pct("5min")
         feat["change_15m"] = pct("15min")
-        feat["change_1h"] = pct("1h")
-        feat["change_6h"] = pct("6h")
-        feat["change_24h"] = pct("1D")
-        feat["vol_1h"] = chg.rolling("1h").std()
-        feat["vol_24h"] = chg.rolling("1D").std()
-        feat["slope_1h"] = (
-            value.rolling("1h").apply(
-                lambda v: (
-                    np.polyfit(np.arange(len(v)), v, 1)[0]
-                    / (abs(v.mean()) or 1.0)
-                    * 100
-                )
-                if len(v) >= 3 and np.isfinite(v).all()
-                else 0.0,
-                raw=False,
+        feat["vol_5m"] = chg.rolling("5min").std()
+        feat["slope_5m"] = value.rolling("5min").apply(
+            lambda v: (
+                np.polyfit(np.arange(len(v)), v, 1)[0]
+                / (abs(v.mean()) or 1.0)
+                * 100
             )
+            if len(v) >= 3 and np.isfinite(v).all()
+            else 0.0,
+            raw=False,
         )
         feat["streak"] = _streak_series(chg)
-        feat["n_obs_24h"] = value.rolling("1D").count()
+        feat["n_obs_5m"] = value.rolling("5min").count()
+
+        # Baseline for resolution: value at t - 24h, forward-filled.
+        baseline = value.rolling("1D").apply(
+            lambda v: v.iloc[0] if len(v) else np.nan, raw=False
+        )
+        feat["_baseline"] = baseline
+
+        ts_col = feat.index
+        feat["hour_utc"] = ts_col.hour
+        feat["day_of_week"] = ts_col.dayofweek
+        feat["is_weekend"] = (ts_col.dayofweek >= 5).astype(int)
+        feat["is_primetime"] = (
+            (ts_col.hour >= 18) & (ts_col.hour <= 23)
+        ).astype(int)
+
+        mk = markets_by_id.get(asset_id, {})
+        res_type = mk.get("resolutionType")
+        bps = mk.get("thresholdBps")
+        frac = (float(bps) / 10000.0) if bps is not None else None
+
+        if res_type == "up_x" and frac is not None:
+            target = baseline * (1 + frac)
+            feat["dist_to_up"] = (value - target) / target.abs().replace(0, 1) * 100.0
+            feat["dist_to_down"] = 0.0
+        elif res_type == "down_x" and frac is not None:
+            target = baseline * (1 - frac)
+            feat["dist_to_down"] = (target - value) / target.abs().replace(0, 1) * 100.0
+            feat["dist_to_up"] = 0.0
+        else:
+            feat["dist_to_up"] = 0.0
+            feat["dist_to_down"] = 0.0
+
+        # Current resolution — 1 if this tick IS a YES per the rule.
+        def _row_res(val: float) -> int:
+            b = float(feat.loc[feat.index[feat.index.get_indexer([value.index[value.index == val].max()])[0]], "_baseline"]) if False else 0
+            return 0
+        feat["current_resolution"] = [
+            compute_label(float(v), float(b) if np.isfinite(b) else 0.0, res_type, bps)
+            for v, b in zip(value, baseline)
+        ]
+
         feat["current_change_pct"] = chg
 
-        # Label: next value higher than this one.
+        # Cross-asset context is computed per-tick across all assets in a
+        # second pass below. Placeholder zeros for now.
+        feat["category_mean_5m"] = 0.0
+        feat["asset_vs_category_5m"] = feat["change_5m"]
+
+        # Label: apply resolution rule to value at t+1 vs baseline at t+1.
         next_val = value.shift(-1)
-        label = (next_val > value).astype(int)
-        feat["_label"] = label
+        next_baseline = baseline.shift(-1).fillna(baseline)
+        feat["_label"] = [
+            compute_label(
+                float(nv) if np.isfinite(nv) else 0.0,
+                float(nb) if np.isfinite(nb) else 0.0,
+                res_type,
+                bps,
+            )
+            for nv, nb in zip(next_val, next_baseline)
+        ]
         feat["_asset_id"] = asset_id
 
-        # Drop the final row (no next) and any rows lacking the minimum
-        # context (require at least a 1h change).
-        feat = feat.dropna(subset=["change_1h", "_label"])
+        feat = feat.dropna(subset=["change_5m"])
+        feat = feat[feat["_label"].notna()]
         if feat.empty:
             continue
+        # Drop the last row (no next tick)
+        feat = feat.iloc[:-1]
         frames.append(feat)
 
     if not frames:
         return pd.DataFrame(), pd.Series(dtype=int)
 
     full = pd.concat(frames, ignore_index=False)
-    y = full["_label"].astype(int)
-    X = full.drop(columns=["_label", "_asset_id"]).reindex(
-        columns=FEATURE_COLS, fill_value=0.0
-    ).astype(float).fillna(0.0)
-    y.index = range(len(y))
-    X.index = range(len(X))
+    y = full["_label"].astype(int).reset_index(drop=True)
+    X = (
+        full.drop(columns=["_label", "_asset_id", "_baseline"])
+        .reindex(columns=FEATURE_COLS, fill_value=0.0)
+        .astype(float)
+        .fillna(0.0)
+        .reset_index(drop=True)
+    )
     return X, y
 
 
@@ -134,10 +197,11 @@ class XGBPredictor:
         self,
         history: pd.DataFrame,
         save_path: str | Path | None = None,
+        markets_by_id: dict[str, dict] | None = None,
     ) -> dict:
         from xgboost import XGBClassifier
 
-        X, y = build_training_set(history)
+        X, y = build_training_set(history, markets_by_id=markets_by_id)
         if len(X) < 100:
             raise RuntimeError(
                 f"Training set too small ({len(X)} rows). "

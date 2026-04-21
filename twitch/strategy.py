@@ -102,12 +102,12 @@ class Rolling:
     """
 
     name = "rolling"
+    # Tick is 60 s — weight the shortest windows most. Longer horizons
+    # are intentionally absent: they don't predict next-tick movement.
     DEFAULT_WEIGHTS = {
-        "change_5m": 0.30,
-        "change_15m": 0.25,
-        "change_1h": 0.20,
-        "change_6h": 0.15,
-        "change_24h": 0.10,
+        "change_1m": 0.45,
+        "change_5m": 0.35,
+        "change_15m": 0.20,
     }
 
     def __init__(self, features_df=None, weights: dict | None = None):
@@ -165,6 +165,7 @@ def make_predictor_with_features(
     claude_base: str = "rolling",
     claude_top_k: int = 20,
     ensemble_spec: list[tuple[str, float]] | None = None,
+    markets_by_id: dict | None = None,
 ):
     """Factory for history-aware / ML / LLM predictors that can't be
     built by a zero-arg constructor."""
