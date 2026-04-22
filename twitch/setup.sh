@@ -40,6 +40,19 @@ fi
 info "installing requirements"
 .venv/bin/pip install -q -r requirements.txt
 
+# pip sometimes claims "already satisfied" on a fresh venv when a transitive
+# requirement chain finishes before top-level lines are visited. Explicitly
+# install the ML stack to make sure it actually lands.
+info "verifying ML stack"
+.venv/bin/python -c "import pandas, numpy, xgboost, sklearn, anthropic" 2>/dev/null || {
+    warn "ML stack missing after requirements.txt — installing explicitly"
+    .venv/bin/pip install -q --no-cache-dir \
+        "pandas>=2.1.0" "numpy>=1.24.0" "xgboost>=2.0.0" \
+        "scikit-learn>=1.3.0" "anthropic>=0.40.0" "scipy>=1.11.0"
+    .venv/bin/python -c "import pandas, numpy, xgboost, sklearn, anthropic" \
+        || die "ML stack still broken after explicit install — debug manually"
+}
+
 # macOS libomp reminder (xgboost)
 if [ "$(uname)" = "Darwin" ] && ! ls /opt/homebrew/Cellar/libomp 2>/dev/null | head -1 >/dev/null 2>&1; then
     warn "macOS: xgboost needs libomp → run: brew install libomp"
