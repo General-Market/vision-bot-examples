@@ -1,8 +1,10 @@
 # twitch — Vision-testnet trading bot
 
-Python bot that trades the Twitch source on Vision testnet (Index L3, chainId 111222333).
+Trades the Twitch source on Vision testnet (Index L3, chainId 111222333).
 
-Current batch: **~8200 markets**, 92% streamers (`twitch_stream_*`), 8% games (`twitch_game_*`). Tick **60 s**. MIN_DEPOSIT **0.1 L3 USDC**.
+**Current batch:** ~8200 markets (92% streamers, 8% games). Tick 60 s. MIN_DEPOSIT 0.1 L3 USDC.
+
+Companion article: see `twitch-bot-vision-article.md` in the parent repo for the reasoning behind every design choice.
 
 ## Setup
 
@@ -10,134 +12,103 @@ Current batch: **~8200 markets**, 92% streamers (`twitch_stream_*`), 8% games (`
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# optionally set BOT_PRIVATE_KEY in .env for `trade`
-# set ANTHROPIC_API_KEY in .env for `--strategy claude`
+# optional: BOT_PRIVATE_KEY for `trade`, ANTHROPIC_API_KEY for `--strategy claude`
 ```
 
-Python 3.11+ required (3.14 recommended). `brew install libomp` on macOS for xgboost.
-
-## Pipeline
-
-```
-  snapshot ────┐
-               │
-  history ──→ features ──→ predictor ──→ scores ──→ picks ──→ bitmap ──→ joinBatchDirect
-               │                                     (threshold)           (1024 bytes, keccak)
-  snapshot ────┘
-```
-
-Every strategy conforms to the same contract:
-
-```python
-predictor.predict(markets, snapshot_by_id) -> list[float]
-# positive → UP likely, negative → DOWN likely
-```
-
-`picks_from_scores(scores, threshold=0.0)` binarises. Trading transport stays strategy-agnostic.
+Python 3.11+. On macOS: `brew install libomp` (xgboost dependency).
 
 ## Commands
 
 ```bash
-# Sanity-check infra — no credentials, no cost.
+# Infra sanity check — no credentials needed.
 python main.py probe
 
-# Dryrun: build the join tx with a real strategy, print it, exit.
-python main.py dryrun --strategy rolling --history-hours 2
+# Dryrun: builds the join tx with a real strategy, prints it, exits.
+python main.py dryrun --strategy momentum --deposit 0.1
+python main.py dryrun --strategy xgb --history-hours 2
 
-# Train XGBoost on N assets × H hours of real history (~24 days retained).
+# Train XGBoost on real history (~24 days retained upstream).
 python main.py train-xgb --hours 168 --max-assets 500 --out models/xgb.pkl
 
-# Walk-forward backtest: score every historical tick, compare to actuals.
-python main.py backtest --strategy rolling --hours 6 --max-assets 100
+# Walk-forward backtest with flip/stuck breakdown.
+python main.py backtest --strategy xgb --hours 6 --max-assets 30
 
-# Real trade — signs and sends.
+# Real trade — signs and sends. Requires BOT_PRIVATE_KEY funded with L3 USDC.
 python main.py trade --strategy ensemble --deposit 0.1
 ```
 
-## Strategy stack
-
-| `--strategy` | Uses history? | Uses ML? | Uses Claude? | What it does |
-|---|:---:|:---:|:---:|---|
-| `all_yes` / `all_no` | no | no | no | Baselines. |
-| `momentum` | no | no | no | `changePct / 100`. Snapshot only. |
-| `contrarian` | no | no | no | `-changePct / 100`. |
-| `logistic` | no | no | no | `tanh(0.5 × changePct)`. Confidence-weighted momentum. |
-| `rolling` | **yes** | no | no | Weighted sum of rolling 5m/15m/1h/6h/24h changes, shaped by streak length. |
-| `xgb` | yes | **yes** | no | XGBoost binary classifier — features from `features.extract_features`, labels from next-tick direction. Regularised + early-stopping. |
-| `claude` | yes | delegated | **yes** | Wraps a base predictor; for the top-K markets where the base is uncertain (scores near threshold), calls Claude with the asset's rolling summary and lets it override. |
-| `ensemble` | yes | yes | optional | Weighted blend. Default: 50% rolling + 50% xgb. |
-
-## Feature set (`features.extract_features`)
-
-Per asset, one row:
-
-- `change_5m`, `change_15m`, `change_1h`, `change_6h`, `change_24h` — rolling pct change from value at window-start.
-- `vol_1h`, `vol_24h` — std of pct-change returns.
-- `mean_1h`, `mean_24h` — mean value over window.
-- `slope_1h` — linear-regression slope, normalised (%/hour).
-- `streak` — length of current same-sign change run (positive = up).
-- `n_obs_24h` — sample count. Directly usable as confidence gate.
-- `current_change_pct` — live snapshot value (may be ahead of the last history row).
-
-## History access
-
-Data-node endpoint: `GET /market/batch-history?assets=id1,id2,...&from=ISO`.
-
-- Max 100 assets per request (server-enforced).
-- Retention: ~24 days.
-- Density varies — popular assets get updates every minute or two; long-tail assets get a handful per day.
-
-`history.fetch_history(assets, hours)` chunks concurrently (8 workers) and returns one DataFrame.
+## Pipeline
 
 ```
-300 assets × 168h →  757k rows in ~128s
-8192 assets × 2h → 189k rows in  ~37s
+snapshot + history ─→ features ─→ predictor ─→ scores ─→ picks ─→ bitmap ─→ joinBatchDirect
+                                                  (threshold)      (1024 B, keccak commitment)
 ```
 
-## Claude integration
-
-`claude_predictor.ClaudePredictor` wraps any base predictor. For the top-K markets whose base scores sit closest to the threshold, it builds a compact prompt per marginal pick (assetId, name, current change, rolling features) and asks Claude for a single UP/DOWN verdict. Overrides the base score only on those marginals.
-
-Cost scales with `--claude-top-k` (default 20), not market count. Zero tokens on markets where the base is already confident.
-
-```bash
-export ANTHROPIC_API_KEY=sk-...
-python main.py dryrun --strategy claude --claude-top-k 30
-```
-
-## Adding your own predictor
-
-Three lines in `strategy.py`:
+Every predictor conforms to:
 
 ```python
-class MyPredictor:
-    name = "my"
-    def predict(self, markets, snapshot_by_id):
-        return [some_math(m, snapshot_by_id.get(m["assetId"])) for m in markets]
-
-REGISTRY["my"] = MyPredictor
+predictor.predict(markets, snapshot_by_id) -> list[float]
+# positive score → UP likely, negative → DOWN likely
 ```
 
-If it needs features, include `make_predictor_with_features` handling for the name.
+`picks_from_scores(scores, threshold=0.0)` binarises. The trading transport is predictor-agnostic — swap momentum for XGBoost for Claude without touching `encode_bitmap`.
 
-## Walk-forward backtest
+## Strategies
 
-```bash
-python main.py backtest --strategy rolling --hours 6 --max-assets 100
+| `--strategy` | History? | ML? | Claude? | What it does |
+|---|:---:|:---:|:---:|---|
+| `all_yes` / `all_no` | — | — | — | Baselines. |
+| `momentum` | — | — | — | `changePct / 100`. |
+| `contrarian` | — | — | — | Fade the trend. |
+| `rolling` | ✓ | — | — | Weighted short-window changes. |
+| `xgb` | ✓ | ✓ | — | XGBoost classifier on resolution-aware labels. |
+| `ensemble` | ✓ | ✓ | optional | Weighted blend (default 50% rolling + 50% xgb). |
+| `claude` | ✓ | delegated | ✓ | Wraps a base; Claude overrides only the marginal picks. |
+
+## Features
+
+Short-horizon only — tick is 60 s, longer windows don't predict next-tick:
+
+- `change_1m`, `change_5m`, `change_15m`
+- `vol_5m`, `slope_5m`, `streak`, `n_obs_5m`
+- `hour_utc`, `day_of_week`, `is_weekend`, `is_primetime`
+- `baseline_24h` (used only as resolution-rule input, not as a change feature)
+- `dist_to_up`, `dist_to_down` (signed distance to the market's threshold)
+- `category_mean_5m`, `asset_vs_category_5m` (cross-asset platform signal)
+- `current_change_pct`
+
+## Labels
+
+**The oracle resolves against each market's threshold rule, not against direction.** Training on "did the value go up" teaches the wrong question.
+
+```python
+def compute_label(next_value, baseline_24h, resolution_type, threshold_bps):
+    frac = threshold_bps / 10000
+    if resolution_type == "up_x":    return int(next_value > baseline_24h * (1 + frac))
+    if resolution_type == "down_x":  return int(next_value < baseline_24h * (1 - frac))
+    if resolution_type == "up_0":    return int(next_value > 0)
+    if resolution_type == "flat_x":  return int(abs(next_value - baseline_24h) / abs(baseline_24h) < frac)
 ```
 
-For each (asset, tick_i) with enough history, features are computed from ticks `[0..i]`, the predictor scores the asset, the score is binarised, and the prediction is compared to `sign(value[i+1] - value[i])`. Output:
+## Measured edge
 
-```
-{'n': 14237, 'accuracy': 0.51, 'log_loss': 0.69, 'direction_up_rate': 0.48}
-```
+Training on 500 assets × 168 h of history, 1.2 M rows, resolution-aware labels:
 
-If your accuracy isn't comfortably above `direction_up_rate` and its complement, you have no edge — the strategy is just tracking drift.
+- train 97.2% / test 97.1% — no overfit
+- naive "copy current resolution" baseline: 95.85%
+- XGBoost: 97.16%
+- **Flip-catch (the only metric that matters): ~35%** on the 4.15% of ticks that actually flip
 
-## Notes
+The 1.31 pp of headline accuracy is the entire edge against bots that always copy current state.
 
-- Bitmap is always 1024 bytes, MSB-first per byte. Market `i` → bit `7 - (i % 8)` of byte `i // 8`.
-- L3 USDC has 18 decimals. `int(0.1 * 1e18)` for 0.1 USDC.
-- Pool totals are not queryable. You trade blind — the edge comes from your predictor.
-- `probe` and `dryrun` auto-generate an ephemeral key if `BOT_PRIVATE_KEY` is unset.
-- USDC address is self-discovered via `vision.functions.USDC().call()`.
+## The invariants
+
+1. Bitmap is always **1024 bytes**, MSB-first per byte. Shorter buffers hash wrong and reject.
+2. L3 USDC is **18 decimals**. `int(0.1 * 10**18)` for 0.1 USDC.
+3. MIN_DEPOSIT = 0.1 USDC (`1e17` wei). Lower joins revert.
+4. `config_hash` from `getBatch` is passed verbatim to `joinBatchDirect`.
+5. Bitmap reveal to oracles must follow the join tx confirmation.
+6. Pool totals are not queryable. Trade blind.
+7. `eth_getCode(vision_address)` must return non-empty before you trust a hard-coded address.
+8. USDC address is self-discovered via `vision.USDC()`.
+9. `probe` and `dryrun` auto-generate an ephemeral key if `BOT_PRIVATE_KEY` is unset.

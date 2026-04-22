@@ -232,6 +232,47 @@ class XGBPredictor:
         acc_test = float((model.predict(Xte) == yte).mean()) if len(Xte) else float("nan")
         best_iter = getattr(model, "best_iteration", None)
 
+        # Flip vs stuck breakdown on the TEST split. A "flip" is any
+        # tick where the market would have been resolving NO right now
+        # but resolves YES next — or vice versa. Baseline that trivially
+        # copies current_resolution scores 0% on flips and 100% on
+        # stuck; XGB's lift over that baseline is the real alpha.
+        flip_stats: dict = {}
+        if len(Xte) > 0:
+            current_yes_test = (
+                (Xte["dist_to_up"] > 0) | (Xte["dist_to_down"] > 0)
+            ).astype(int).values
+            preds_test = model.predict(Xte)
+            truths_test = yte.values
+            flips = current_yes_test != truths_test
+            stuck = ~flips
+            n_flips = int(flips.sum())
+            n_stuck = int(stuck.sum())
+            naive_overall = float((current_yes_test == truths_test).mean())
+            flip_stats = {
+                "n_flips_test": n_flips,
+                "n_stuck_test": n_stuck,
+                "flip_rate_test": round(n_flips / len(truths_test), 4),
+                "yes_rate_test": round(float(truths_test.mean()), 4),
+                "naive_acc_test": round(naive_overall, 4),
+                "xgb_acc_test": round(acc_test, 4),
+                "xgb_flip_acc": round(
+                    float((preds_test[flips] == truths_test[flips]).mean()),
+                    4,
+                )
+                if n_flips
+                else float("nan"),
+                "xgb_stuck_acc": round(
+                    float((preds_test[stuck] == truths_test[stuck]).mean()),
+                    4,
+                )
+                if n_stuck
+                else float("nan"),
+                "lift_over_naive_pp": round(
+                    (acc_test - naive_overall) * 100, 2
+                ),
+            }
+
         if save_path:
             self.path = Path(save_path)
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -245,6 +286,7 @@ class XGBPredictor:
             "acc_test": round(acc_test, 4),
             "best_iteration": best_iter,
             "saved": str(self.path) if save_path else None,
+            **flip_stats,
         }
 
     def load(self, path: str | Path) -> None:
