@@ -33,7 +33,7 @@ python main.py trade  --strategy ensemble --deposit 0.1      # sign and send
 | Chain ID | `111222333` |
 | Vision contract | `0x94d540bb45975bd5a0c7ba9a15a0d34e378f6c61` |
 | L3 WUSDC | self-discover via `vision.USDC()` |
-| Data-node | `http://116.203.156.98/data-node` |
+| Data-node | `https://generalmarket.io/bot-api` |
 | Oracles (3) | `http://116.203.156.98/oracle{1,2,3}` |
 
 All reachable over public HTTP — no VPN, no credentials for reads.
