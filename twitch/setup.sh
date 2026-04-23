@@ -43,17 +43,33 @@ info()  { echo -e "${GRN}[setup]${NC} $*"; }
 warn()  { echo -e "${YEL}[setup]${NC} $*"; }
 die()   { echo -e "${RED}[setup]${NC} $*" >&2; exit 1; }
 
+# -----------------------------------------------------------------------
+# Interpreter detection — need ≥ 3.11 for PEP-604 unions.
+# macOS ships 3.9 as system python3; on that platform we'll
+# auto-`brew install python@3.14` if needed, asking first unless the
+# user already passed --auto-fund (which implies unattended mode).
+# -----------------------------------------------------------------------
 command -v python3 >/dev/null || die "python3 not found"
 
-# Detect a 3.11+ interpreter. macOS default 3.9 won't work (PEP-604 unions).
-PYBIN=""
-for candidate in python3.14 python3.13 python3.12 python3.11 python3; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-        ver=$("$candidate" -c 'import sys; print(sys.version_info[0]*100 + sys.version_info[1])' 2>/dev/null)
-        if [ "$ver" -ge 311 ]; then PYBIN="$candidate"; break; fi
+detect_python() {
+    PYBIN=""
+    for candidate in python3.14 python3.13 python3.12 python3.11 python3; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            ver=$("$candidate" -c 'import sys; print(sys.version_info[0]*100 + sys.version_info[1])' 2>/dev/null || echo 0)
+            if [ "$ver" -ge 311 ]; then PYBIN="$candidate"; break; fi
+        fi
+    done
+}
+
+detect_python
+if [ -z "$PYBIN" ]; then
+    if [ "$(uname)" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
+        info "no Python ≥ 3.11 on PATH; installing python@3.14 via Homebrew…"
+        brew install -q python@3.14 || die "brew install python@3.14 failed"
+        detect_python
     fi
-done
-[ -n "$PYBIN" ] || die "need Python 3.11+ (Homebrew: brew install python@3.14)"
+fi
+[ -n "$PYBIN" ] || die "need Python 3.11+ (install via: brew install python@3.14)"
 info "using $PYBIN ($($PYBIN --version))"
 
 if [ ! -d .venv ]; then
@@ -61,15 +77,30 @@ if [ ! -d .venv ]; then
     "$PYBIN" -m venv .venv
 fi
 
+# -----------------------------------------------------------------------
+# Installer: prefer uv (10-50× faster). Fall back to pip. Both paths
+# land the same wheels into the same venv.
+# -----------------------------------------------------------------------
+install_deps() {
+    local req=$1 label=$2
+    if command -v uv >/dev/null 2>&1; then
+        info "installing $label via uv (fast path)"
+        uv pip install --python .venv/bin/python -q -r "$req" \
+            || die "uv install of $req failed"
+    else
+        info "installing $label via pip (uv not found — install https://docs.astral.sh/uv for a ~10× speedup)"
+        .venv/bin/pip install -q -r "$req" \
+            || die "pip install of $req failed"
+    fi
+}
+
 .venv/bin/pip install -q --upgrade pip
-info "installing core requirements (~30 s)"
-.venv/bin/pip install -q -r requirements.txt
+install_deps requirements.txt "core requirements (~30 s with uv, ~60 s with pip)"
 .venv/bin/python -c "import web3, eth_account, requests, dotenv" \
     || die "core deps failed to install"
 
 if [ "$INSTALL_ML" = "1" ]; then
-    info "installing ML stack (~90 s) — rolling / xgb / ensemble / claude"
-    .venv/bin/pip install -q -r requirements-ml.txt
+    install_deps requirements-ml.txt "ML stack (rolling / xgb / ensemble / claude)"
     .venv/bin/python -c "import pandas, numpy, xgboost, sklearn, anthropic" \
         || die "ML stack failed — retry: pip install -r requirements-ml.txt"
 else
