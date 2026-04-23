@@ -90,7 +90,7 @@ _last_reconcile = 0.0
 
 
 PORTFOLIO_API = "https://generalmarket.io/api/vision/player/{addr}/profile"
-PORTFOLIO_URL = "https://generalmarket.io/profile/{addr}"
+PORTFOLIO_URL = "https://generalmarket.io/profile/{addr}?tab=vision"
 
 
 def verify_and_open_portfolio(

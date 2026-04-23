@@ -510,7 +510,7 @@ def cmd_portfolio(args):
             sys.exit(2)
         addr = Account.from_key(key).address
 
-    profile_url = f"https://generalmarket.io/profile/{addr}"
+    profile_url = f"https://generalmarket.io/profile/{addr}?tab=vision"
     api = f"https://generalmarket.io/api/vision/player/{addr}/profile"
     try:
         r = requests.get(api, timeout=10)
