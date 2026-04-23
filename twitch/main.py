@@ -123,19 +123,25 @@ def cmd_dryrun(args):
 
     source = bot.discover_source(args.source)
     print(f"displayName: {source.get('displayName')}")
-    print(f"configHash: {source.get('configHash')}")
     print(f"sourceId: {source.get('sourceId')}")
     print(f"tickDurationSecs: {source.get('tickDurationSecs')}")
+    print(f"data-node configHash (advisory): {source.get('configHash')}")
     markets = source.get("markets") or []
     print(f"market count: {len(markets)}")
     print(f"first 3 markets: {json.dumps(markets[:3], indent=2, default=str)}")
 
-    config_hash_hex = source["configHash"]
-    config_hash = bytes.fromhex(config_hash_hex[2:] if config_hash_hex.startswith("0x") else config_hash_hex)
+    data_node_hash = source["configHash"]
+    config_hash = bytes.fromhex(data_node_hash[2:] if data_node_hash.startswith("0x") else data_node_hash)
     tick = int(source.get("tickDurationSecs") or 0)
 
     batch_id, config_hash = bot.find_active_batch_id(config_hash, tick_duration=tick)
-    print(f"batch_id: {batch_id}  (on-chain configHash=0x{config_hash.hex()})")
+    on_chain_hex = "0x" + config_hash.hex()
+    print(f"batch_id: {batch_id}  on-chain configHash (used in tx): {on_chain_hex}")
+    if on_chain_hex.lower() != data_node_hash.lower():
+        print(
+            "  (data-node hash differs — mid-rotation race. "
+            "tx uses the on-chain value, per invariant 7.)"
+        )
     batch = bot.get_batch(batch_id)
     printable = dict(batch)
     for k in ("source_id", "config_hash"):

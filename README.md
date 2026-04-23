@@ -12,18 +12,17 @@ Each subdirectory is a standalone bot for one Vision source. Bring a testnet wal
 
 More sources incoming — polymarket mirror, crypto price thresholds, weather, others. The transport is source-agnostic; only the strategy layer cares.
 
-## Quick start
+## Zero-to-trading in under 3 minutes
 
 ```bash
-cd twitch
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt   # macOS: brew install libomp
-
-python main.py probe                                         # verify infra
-python main.py dryrun --strategy momentum --deposit 0.1      # build tx, don't sign
-python main.py dryrun --strategy xgb --history-hours 2       # with ML
-python main.py trade  --strategy ensemble --deposit 0.1      # sign and send
+git clone https://github.com/General-Market/vision-bot-examples
+cd vision-bot-examples/twitch
+./setup.sh                                                   # venv + deps + key-gen, ≈ 2 min
+.venv/bin/python main.py probe                               # verify infra
+.venv/bin/python main.py dryrun --strategy momentum          # build tx, don't sign
 ```
+
+Full bootstrap + trading flow is documented in [`AGENTS.md`](./AGENTS.md) — the canonical guide, including wallet funding, model training, two-wallet racing, and troubleshooting.
 
 ## Live testnet infrastructure
 
@@ -33,7 +32,7 @@ python main.py trade  --strategy ensemble --deposit 0.1      # sign and send
 | Chain ID | `111222333` |
 | Vision contract | `0x94d540bb45975bd5a0c7ba9a15a0d34e378f6c61` |
 | L3 WUSDC | self-discover via `vision.USDC()` |
-| Data-node | `https://generalmarket.io/bot-api` |
+| Data-node (cached) | `https://generalmarket.io/bot-api` |
 | Oracles (3) | `http://116.203.156.98/oracle{1,2,3}` |
 
 All reachable over public HTTP — no VPN, no credentials for reads.
@@ -46,6 +45,11 @@ All reachable over public HTTP — no VPN, no credentials for reads.
 4. **Pool totals are not queryable.** Bots trade blind — edge comes from the predictor, not the pool.
 5. **Bitmap reveal to oracles must follow the on-chain join.** Reveal first, rejected.
 6. **Deployment JSON files can lag.** The chain is truth. Check `eth_getCode(vision_address)` before trusting a hard-coded address.
+7. **Data-node config vs on-chain config can differ during tick rotation.** Only the value returned by `getBatch(batch_id)` goes into `joinBatchDirect` — never the one from `/batches/recommended` when they disagree.
+
+## PnL status
+
+**Not yet measured.** Every accuracy / lift number in this repo is offline classification against historical data (97% overall, ~0.5 pp over the sticky baseline). No wallet has signed a real `joinBatchDirect` and observed `PlayerSettled`. To produce a real PnL number, see the racing harness in `AGENTS.md` — `race.sh` spawns two funded wallets on two strategies and `race_report.py` diffs the cumulative PnL.
 
 ## Security
 
