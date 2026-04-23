@@ -89,6 +89,14 @@ class PnLLedger:
             ),
         )
 
+    def last_joined_batch(self, strategy: str) -> int:
+        """Most recent batch_id this strategy has joined, or -1."""
+        row = self._conn.execute(
+            "SELECT MAX(batch_id) FROM joins WHERE strategy = ?",
+            (strategy,),
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else -1
+
     def unsettled_since(self, since_ts: int = 0) -> list[dict]:
         rows = self._conn.execute(
             """SELECT id, batch_id, deposit_wei

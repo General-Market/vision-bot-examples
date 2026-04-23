@@ -144,15 +144,54 @@ def run(args) -> int:
     )
     log(f"bot address: {bot.bot_addr}")
 
-    # Balance check — warn if no USDC.
+    # Balance check — warn if no USDC. With --auto-refaucet, top up from
+    # the L3 public faucet whenever the balance falls below 2 × deposit
+    # (so a long-running bot doesn't silently die mid-race).
+    def _auto_top_up_if_needed() -> bool:
+        try:
+            bal_wei = bot.usdc.functions.balanceOf(bot.bot_addr).call()
+        except Exception as e:
+            log(f"balance check failed: {e}")
+            return True
+        if bal_wei >= int(args.deposit * 1e18):
+            return True
+        if args.auto_refaucet:
+            log(f"balance {bal_wei/1e18:.4f} < deposit — auto-refaucet 1 USDC")
+            try:
+                faucet = Account.from_key(
+                    "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+                )
+                nonce = bot.w3.eth.get_transaction_count(faucet.address)
+                mint_abi = [{
+                    "inputs": [{"name":"to","type":"address"},{"name":"amount","type":"uint256"}],
+                    "name": "mint", "outputs": [],
+                    "stateMutability": "nonpayable", "type": "function",
+                }]
+                u = bot.w3.eth.contract(address=bot.usdc.address, abi=mint_abi)
+                tx = u.functions.mint(bot.bot_addr, int(1 * 1e18)).build_transaction({
+                    "from": faucet.address, "nonce": nonce,
+                    "gas": 120_000, "gasPrice": bot.w3.eth.gas_price,
+                    "chainId": bot.w3.eth.chain_id,
+                })
+                signed = faucet.sign_transaction(tx)
+                h = bot.w3.eth.send_raw_transaction(
+                    getattr(signed, "raw_transaction", None) or signed.rawTransaction
+                )
+                bot.w3.eth.wait_for_transaction_receipt(h, timeout=60)
+                log(f"  minted +1 USDC (tx {h.hex()[:18]}…)")
+                return True
+            except Exception as e:
+                log(f"  auto-refaucet failed: {e}")
+        log(f"insufficient balance ({bal_wei/1e18:.4f} USDC) — fund the wallet or pass --auto-refaucet")
+        return False
+
     try:
         bal_wei = bot.usdc.functions.balanceOf(bot.bot_addr).call()
         log(f"L3 USDC balance: {bal_wei / 1e18:.4f}")
-        if bal_wei < int(args.deposit * 1e18):
-            log(f"insufficient balance for deposit {args.deposit} USDC — fund the wallet first")
-            return 3
     except Exception as e:
         log(f"balance check failed: {e}")
+    if not _auto_top_up_if_needed():
+        return 3
 
     ledger = PnLLedger(args.db)
     deposit_wei = int(args.deposit * 1e18)
@@ -163,12 +202,16 @@ def run(args) -> int:
     markets_cache: dict[str, dict] = {}
     config_hash_cache: bytes | None = None
 
-    last_joined_batch = -1
+    last_joined_batch = ledger.last_joined_batch(args.strategy)
+    if last_joined_batch >= 0:
+        log(f"resuming — last joined batch was {last_joined_batch}")
 
     while not _stop:
         try:
             # Reconcile on each iteration — cheap when there's nothing.
             reconcile_unsettled(bot, ledger)
+            if not _auto_top_up_if_needed():
+                return 3
 
             source = bot.discover_source(args.source)
             config_hash = bytes.fromhex(source["configHash"][2:])
@@ -266,6 +309,12 @@ def main():
     p.add_argument("--history-hours", type=int, default=6)
     p.add_argument("--xgb-model", default=os.getenv("XGB_MODEL_PATH", "models/xgb.pkl"))
     p.add_argument("--db", default="pnl.db")
+    p.add_argument(
+        "--auto-refaucet",
+        action="store_true",
+        help="Top up from the L3 testnet faucet whenever balance drops "
+             "below deposit size. Testnet only.",
+    )
     args = p.parse_args()
     sys.exit(run(args))
 
