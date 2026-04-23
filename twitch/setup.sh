@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
-# One-shot bootstrap. Expected time: 3–5 minutes on a fresh machine.
+# One-shot bootstrap. Expected time: ≈ 2 minutes on a fresh machine.
 #
 # What it does:
 #   1. Creates a Python 3.11+ venv and installs requirements.
 #   2. Generates a BOT_PRIVATE_KEY into .env if one doesn't exist.
-#   3. Trains a baseline XGBoost model on ~200 assets × 24 h of history.
-#   4. Prints the funded-bot address and next steps.
+#   3. Prints the bot address and next steps.
 #
-# Idempotent: safe to re-run. Existing keys and models are preserved
-# unless explicitly removed.
+# Model training is intentionally NOT part of setup — it is an extra
+# ~3 min step that users who want the `xgb` / `ensemble` strategies run
+# on demand:
+#
+#     .venv/bin/python main.py train-xgb --hours 72 --max-assets 500 --out models/xgb.pkl
+#
+# Out-of-the-box strategies (momentum / rolling / contrarian / all_yes)
+# run without a trained model — feature-derived only.
+#
+# Idempotent: safe to re-run. Existing keys are preserved.
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -87,18 +94,6 @@ open(p,'w').write(s)
     info "→ fund with at least 0.5 L3 USDC before running live_trader.py"
 fi
 
-if [ ! -f models/xgb.pkl ]; then
-    info "training baseline XGBoost model (≈ 3 min)…"
-    mkdir -p models
-    # 500 × 72 h produces ~560 k training rows, converges with real edge:
-    # lift_over_naive ≈ 0.5 pp, flip-catch ≈ 20%. For stronger edge, users
-    # can re-run `main.py train-xgb --hours 168 --max-assets 500`.
-    .venv/bin/python main.py train-xgb --hours 72 --max-assets 500 --out models/xgb.pkl
-    info "model saved to models/xgb.pkl"
-else
-    info "existing model found at models/xgb.pkl — skipping training"
-fi
-
 info ""
 info "${GRN}setup complete${NC}"
 BOT_ADDR=$(.venv/bin/python -c "
@@ -113,6 +108,8 @@ info ""
 info "bot address : ${BOT_ADDR}"
 info "next steps  :"
 info "  1. Fund this address with L3 testnet USDC (≥ 0.5 USDC recommended)"
-info "  2. Run:   .venv/bin/python main.py probe     (sanity check)"
-info "  3. Run:   .venv/bin/python live_trader.py --deposit 0.1 --strategy ensemble"
-info "  4. Watch: .venv/bin/python -c 'from pnl_logger import report; report(\"pnl.db\")'"
+info "  2. Sanity check:   .venv/bin/python main.py probe"
+info "  3. Dryrun:         .venv/bin/python main.py dryrun --strategy momentum"
+info "  4. Trade live:     .venv/bin/python live_trader.py --deposit 0.1 --strategy momentum"
+info "  5. (optional) Train the ML model — adds ~3 min, unlocks xgb / ensemble:"
+info "     .venv/bin/python main.py train-xgb --hours 72 --max-assets 500 --out models/xgb.pkl"
