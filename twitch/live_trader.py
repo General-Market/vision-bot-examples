@@ -287,6 +287,10 @@ def run(args) -> int:
                 picks_total=n,
             )
             last_joined_batch = batch_id
+            join_count = (locals().get("join_count") or 0) + 1
+            if args.max_joins and join_count >= args.max_joins:
+                log(f"reached --max-joins={args.max_joins}; exiting")
+                return 0
 
         except Exception as e:
             log(f"iteration error: {e!r} — sleeping {IDLE_SLEEP_SEC}s")
@@ -314,6 +318,12 @@ def main():
         action="store_true",
         help="Top up from the L3 testnet faucet whenever balance drops "
              "below deposit size. Testnet only.",
+    )
+    p.add_argument(
+        "--max-joins",
+        type=int,
+        default=0,
+        help="Exit cleanly after N successful joins (0 = run forever).",
     )
     args = p.parse_args()
     sys.exit(run(args))

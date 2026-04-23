@@ -1,0 +1,14 @@
+# Heavy ML stack — needed only for --strategy rolling / xgb / ensemble /
+# claude and for backtest / train-xgb. Not required to probe, dryrun, or
+# live-trade the momentum / contrarian / all_yes / all_no baselines.
+#
+# Install with:
+#     pip install -r requirements-ml.txt
+#
+# macOS note: xgboost also needs OpenMP — `brew install libomp`.
+pandas>=2.1.0
+numpy>=1.24.0
+scipy>=1.11.0
+scikit-learn>=1.3.0
+xgboost>=2.0.0
+anthropic>=0.40.0

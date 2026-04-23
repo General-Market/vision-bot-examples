@@ -23,9 +23,11 @@
 # Idempotent: safe to re-run. Existing keys are preserved.
 
 AUTO_FUND=0
+INSTALL_ML=0
 for arg in "$@"; do
     case "$arg" in
         --auto-fund) AUTO_FUND=1 ;;
+        --with-ml)   INSTALL_ML=1 ;;
         -h|--help)
             sed -n '/^#!/,/^$/p' "$0" | sed 's/^# \?//'
             exit 0
@@ -60,21 +62,20 @@ if [ ! -d .venv ]; then
 fi
 
 .venv/bin/pip install -q --upgrade pip
-info "installing requirements"
+info "installing core requirements (~30 s)"
 .venv/bin/pip install -q -r requirements.txt
+.venv/bin/python -c "import web3, eth_account, requests, dotenv" \
+    || die "core deps failed to install"
 
-# pip sometimes claims "already satisfied" on a fresh venv when a transitive
-# requirement chain finishes before top-level lines are visited. Explicitly
-# install the ML stack to make sure it actually lands.
-info "verifying ML stack"
-.venv/bin/python -c "import pandas, numpy, xgboost, sklearn, anthropic" 2>/dev/null || {
-    warn "ML stack missing after requirements.txt — installing explicitly"
-    .venv/bin/pip install -q --no-cache-dir \
-        "pandas>=2.1.0" "numpy>=1.24.0" "xgboost>=2.0.0" \
-        "scikit-learn>=1.3.0" "anthropic>=0.40.0" "scipy>=1.11.0"
+if [ "$INSTALL_ML" = "1" ]; then
+    info "installing ML stack (~90 s) — rolling / xgb / ensemble / claude"
+    .venv/bin/pip install -q -r requirements-ml.txt
     .venv/bin/python -c "import pandas, numpy, xgboost, sklearn, anthropic" \
-        || die "ML stack still broken after explicit install — debug manually"
-}
+        || die "ML stack failed — retry: pip install -r requirements-ml.txt"
+else
+    info "skipping ML stack — momentum / all_yes / all_no / contrarian run on core alone"
+    info "                    (later: pip install -r requirements-ml.txt for xgb/ensemble)"
+fi
 
 # macOS libomp reminder (xgboost)
 if [ "$(uname)" = "Darwin" ] && ! ls /opt/homebrew/Cellar/libomp 2>/dev/null | head -1 >/dev/null 2>&1; then
@@ -128,18 +129,28 @@ fi
 info ""
 info "${GRN}setup complete${NC}"
 info ""
-info "bot address : ${BOT_ADDR}"
-info "next steps  :"
-if [ "$AUTO_FUND" != "1" ]; then
-    info "  1. Fund this address on L3 (either):"
-    info "       .venv/bin/python main.py faucet --to ${BOT_ADDR} --usdc 1"
-    info "       or transfer L3 USDC from your own funded wallet."
-    info "  2. Sanity check:   .venv/bin/python main.py probe"
-    info "  3. Dryrun:         .venv/bin/python main.py dryrun --strategy momentum"
-    info "  4. Trade live:     .venv/bin/python live_trader.py --strategy momentum --deposit 0.1"
-else
-    info "  1. Sanity check:   .venv/bin/python main.py probe"
-    info "  2. Trade live:     .venv/bin/python live_trader.py --strategy momentum --deposit 0.1"
-    info "  3. Watch PnL:      .venv/bin/python -c 'from pnl_logger import report; report(\"pnl.db\")'"
+echo -e "${GRN}"
+cat <<EOF
+╭──────────────────────────────────────────────────────────────────╮
+│                        YOUR BOT WALLET                            │
+│  ${BOT_ADDR}  │
+EOF
+if [ "$AUTO_FUND" = "1" ]; then
+    echo -e "│              ${GRN}funded via the L3 testnet faucet${NC}                    │"
 fi
-info "  opt. train ML:       .venv/bin/python main.py train-xgb --hours 72 --max-assets 500 --out models/xgb.pkl"
+cat <<EOF
+╰──────────────────────────────────────────────────────────────────╯
+${NC}
+EOF
+info "next steps:"
+if [ "$AUTO_FUND" != "1" ]; then
+    info "  fund:        .venv/bin/python main.py faucet --to ${BOT_ADDR} --usdc 1"
+    info "  probe:       .venv/bin/python main.py probe"
+    info "  trade:       .venv/bin/python main.py trade --strategy momentum --deposit 0.1"
+else
+    info "  probe:       .venv/bin/python main.py probe"
+    info "  trade:       .venv/bin/python main.py trade --strategy momentum --deposit 0.1"
+    info "  watch pnl:   .venv/bin/python -c 'from pnl_logger import report; report(\"pnl.db\")'"
+fi
+info "  ml add-on:   pip install -r requirements-ml.txt  (unlocks rolling / xgb / ensemble / claude)"
+info "  train model: .venv/bin/python main.py train-xgb --hours 72 --max-assets 500 --out models/xgb.pkl  (needs ml add-on)"

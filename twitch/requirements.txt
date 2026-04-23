@@ -1,3 +1,11 @@
+# Core dependencies — enough for probe / dryrun / live trade with the
+# momentum / contrarian / all_yes / all_no strategies and the CLI
+# helpers (gen-keys, fund, faucet, balance). Installs in ~30 s on a
+# fresh venv.
+#
+# For history-aware / ML / LLM strategies (rolling, xgb, ensemble,
+# claude), additionally run:
+#     pip install -r requirements-ml.txt
 web3>=6.15.0
 eth-account>=0.11.0
 requests>=2.31.0
