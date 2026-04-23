@@ -498,6 +498,53 @@ def cmd_faucet(args):
     print(f"  final: {to}  ETH {eth_bal:.4f}  USDC {usdc_bal:.4f}")
 
 
+def cmd_portfolio(args):
+    """Verify the wallet has at least one indexed trade, then print + open
+    the public portfolio URL on generalmarket.io."""
+    if args.addr:
+        addr = Web3.to_checksum_address(args.addr)
+    else:
+        key = os.getenv("BOT_PRIVATE_KEY") or os.getenv("BOT_PRIVATE_KEY_A")
+        if not key:
+            print("No --addr and no BOT_PRIVATE_KEY in .env")
+            sys.exit(2)
+        addr = Account.from_key(key).address
+
+    profile_url = f"https://generalmarket.io/profile/{addr}"
+    api = f"https://generalmarket.io/api/vision/player/{addr}/profile"
+    try:
+        r = requests.get(api, timeout=10)
+        r.raise_for_status()
+        data = r.json() or {}
+    except Exception as e:
+        print(f"profile API unreachable: {e}")
+        print(f"Portfolio URL (unverified): {profile_url}")
+        sys.exit(1)
+
+    stats = data.get("stats") or {}
+    total = int(stats.get("totalBatches", 0))
+    if total == 0:
+        print(f"No indexed trades yet for {addr}.")
+        print(f"The URL is {profile_url} — it will populate after your first join.")
+        sys.exit(1)
+
+    pnl = stats.get("pnl", 0)
+    roi = stats.get("roi", 0)
+    win_rate = stats.get("winRate", 0)
+    print(f"Wallet   {addr}")
+    print(f"Batches  {total}  |  PnL {pnl:+.4f} USDC  |  ROI {roi:+.2f}%  |  win rate {win_rate:.1f}%")
+    print(f"View at  {profile_url}")
+
+    if not args.no_open:
+        try:
+            import webbrowser
+            opened = webbrowser.open(profile_url, new=2)
+            if opened:
+                print("(opened in your default browser)")
+        except Exception as e:
+            print(f"(could not auto-open browser: {e})")
+
+
 def cmd_balance(args):
     from dotenv import dotenv_values
 
@@ -617,6 +664,23 @@ def main():
         "balance", help="Print L3 USDC balance of each configured wallet."
     )
 
+    p_port = sub.add_parser(
+        "portfolio",
+        help="Show the wallet's public portfolio URL on generalmarket.io. "
+             "Waits for the indexer to surface at least one trade before "
+             "opening the browser.",
+    )
+    p_port.add_argument(
+        "--addr",
+        default=None,
+        help="Wallet to inspect (default: derived from BOT_PRIVATE_KEY).",
+    )
+    p_port.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Print the URL but don't launch a browser.",
+    )
+
     p_bt = sub.add_parser("backtest")
     p_bt.add_argument("--source", default="twitch")
     p_bt.add_argument("--hours", type=int, default=6)
@@ -655,6 +719,8 @@ def main():
         cmd_faucet(args)
     elif args.cmd == "balance":
         cmd_balance(args)
+    elif args.cmd == "portfolio":
+        cmd_portfolio(args)
 
 
 if __name__ == "__main__":

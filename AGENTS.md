@@ -15,7 +15,19 @@ git clone https://github.com/General-Market/vision-bot-examples
 cd vision-bot-examples/twitch
 ./setup.sh --auto-fund                                  # ≈ 90 s
 .venv/bin/python live_trader.py --strategy momentum --deposit 0.1 --max-joins 1
+# After the join confirms, the bot verifies the data-node has indexed
+# the trade and opens https://generalmarket.io/profile/<wallet> in
+# your default browser. --no-open-portfolio to suppress.
 ```
+
+Public portfolio lookup without running the trader:
+
+```bash
+.venv/bin/python main.py portfolio                      # your wallet
+.venv/bin/python main.py portfolio --addr 0x…           # any address
+```
+
+Prints joins, settled ticks, PnL, ROI, win-rate, then opens the browser to `generalmarket.io/profile/<address>`.
 
 The bootstrap prints the generated wallet address in a banner at the end. `--max-joins 1` exits after the first real on-chain join (≈ 30 s). Total: **≈ 2.5 min** on a fresh machine.
 

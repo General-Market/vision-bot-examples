@@ -89,6 +89,51 @@ def ensure_allowance(bot: VisionBot, target_wei: int) -> None:
 _last_reconcile = 0.0
 
 
+PORTFOLIO_API = "https://generalmarket.io/api/vision/player/{addr}/profile"
+PORTFOLIO_URL = "https://generalmarket.io/profile/{addr}"
+
+
+def verify_and_open_portfolio(
+    bot_addr: str,
+    auto_open: bool = True,
+    retries: int = 4,
+    backoff_sec: float = 3.0,
+) -> str | None:
+    """After the first successful join, poll the public profile API until
+    the indexer has picked up at least one batch, then print (and
+    optionally open) the wallet's portfolio URL. Returns the URL once
+    trades are visible, or None if they don't appear within `retries`.
+    """
+    url = PORTFOLIO_URL.format(addr=bot_addr)
+    api = PORTFOLIO_API.format(addr=bot_addr)
+    for attempt in range(1, retries + 1):
+        try:
+            r = requests.get(api, timeout=8)
+            if r.ok:
+                data = r.json() or {}
+                total = int((data.get("stats") or {}).get("totalBatches", 0))
+                if total >= 1:
+                    log(
+                        f"portfolio ready — {total} batch(es) indexed. "
+                        f"View at: {url}"
+                    )
+                    if auto_open:
+                        try:
+                            import webbrowser
+                            if webbrowser.open(url, new=2):
+                                log("  opened in browser")
+                        except Exception as e:
+                            log(f"  (headless; open manually) {e}")
+                    return url
+        except Exception as e:
+            log(f"portfolio poll attempt {attempt}: {e}")
+        time.sleep(backoff_sec * attempt)
+    log(
+        f"portfolio not indexed yet — check later at: {url}"
+    )
+    return None
+
+
 def reconcile_unsettled(bot: VisionBot, ledger: PnLLedger, lookback_blocks: int = 50_000, min_interval_sec: int = 120) -> None:
     """Walk unsettled joins, check for PlayerSettled, stamp pnl.
     Throttled — scanning logs on every tick is expensive and redundant."""
@@ -288,6 +333,16 @@ def run(args) -> int:
             )
             last_joined_batch = batch_id
             join_count = (locals().get("join_count") or 0) + 1
+
+            # First confirmed join — surface the portfolio URL so the
+            # user can see their trades on generalmarket.io. Only opens
+            # after the data-node indexer actually lists the batch.
+            if join_count == 1:
+                verify_and_open_portfolio(
+                    bot.bot_addr,
+                    auto_open=not args.no_open_portfolio,
+                )
+
             if args.max_joins and join_count >= args.max_joins:
                 log(f"reached --max-joins={args.max_joins}; exiting")
                 return 0
@@ -324,6 +379,12 @@ def main():
         type=int,
         default=0,
         help="Exit cleanly after N successful joins (0 = run forever).",
+    )
+    p.add_argument(
+        "--no-open-portfolio",
+        action="store_true",
+        help="Suppress auto-opening the portfolio URL after the first join. "
+             "The URL is still printed to the log.",
     )
     args = p.parse_args()
     sys.exit(run(args))
