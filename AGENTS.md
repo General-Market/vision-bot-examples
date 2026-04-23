@@ -12,13 +12,15 @@ The transport (bitmap encoding, `joinBatchDirect`, oracle quorum reveal, `Player
 
 ```bash
 git clone https://github.com/General-Market/vision-bot-examples
-cd vision-bot-examples/twitch
-./setup.sh --auto-fund                                  # ≈ 90 s
-.venv/bin/python live_trader.py --strategy momentum --deposit 0.1 --max-joins 1
+cd vision-bot-examples
+./setup.sh --auto-fund                                  # defaults to twitch
+.venv/bin/python twitch/live_trader.py --strategy momentum --deposit 0.1 --max-joins 1
 # After the join confirms, the bot verifies the data-node has indexed
 # the trade and opens https://generalmarket.io/profile/<wallet> in
 # your default browser. --no-open-portfolio to suppress.
 ```
+
+**No source specified = twitch.** The repo-root `./setup.sh` forwards to `twitch/setup.sh`. Pass `--source <name>` (or `SOURCE=<name>`) when other bots ship.
 
 Public portfolio lookup without running the trader:
 

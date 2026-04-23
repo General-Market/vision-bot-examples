@@ -2,7 +2,7 @@
 
 Reference trading bots for [Vision](https://generalmarket.io) — an on-chain parimutuel prediction-market layer running on Index L3 (Arbitrum Orbit, chainId `111222333`).
 
-Each subdirectory is a standalone bot for one Vision source. Bring a testnet wallet, pick a strategy, trade.
+Each subdirectory is a standalone bot for one Vision source. **When no source is specified, `twitch` is the default.** Bring a testnet wallet, pick a strategy, trade.
 
 ## Examples
 
@@ -16,11 +16,12 @@ More sources incoming — polymarket mirror, crypto price thresholds, weather, o
 
 ```bash
 git clone https://github.com/General-Market/vision-bot-examples
-cd vision-bot-examples/twitch
-./setup.sh                                                   # venv + deps + key-gen, ≈ 2 min
-.venv/bin/python main.py probe                               # verify infra
-.venv/bin/python main.py dryrun --strategy momentum          # build tx, don't sign
+cd vision-bot-examples
+./setup.sh --auto-fund                                       # defaults to twitch
+.venv/bin/python twitch/live_trader.py --deposit 0.1 --max-joins 1
 ```
+
+The root `./setup.sh` forwards to `twitch/setup.sh` when no source is given. Pass `--source <name>` or set `SOURCE=<name>` when other bots ship.
 
 Full bootstrap + trading flow is documented in [`AGENTS.md`](./AGENTS.md) — the canonical guide, including wallet funding, model training, two-wallet racing, and troubleshooting.
 
