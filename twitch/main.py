@@ -436,6 +436,68 @@ def cmd_fund(args):
     print(f"transfer {args.amount} USDC → {to}: tx {h.hex()} status {receipt.status}")
 
 
+# Public anvil account index 1. Not a secret — this is the standard
+# Hardhat/Foundry test-mnemonic key ("test test test ... junk") and is
+# widely used to seed L3 / devnet contracts. On this testnet it holds
+# ~260 ETH native and can call the public mint() on the L3 WUSDC.
+# Re-running faucet many times is safe: it only adds supply; other
+# operators can also mint. Do NOT use on mainnet.
+_ANVIL_FAUCET_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+
+
+def cmd_faucet(args):
+    rpc = cfg("RPC_URL")
+    vision_addr = cfg("VISION_ADDRESS")
+    faucet_acct = Account.from_key(_ANVIL_FAUCET_KEY)
+
+    bot = VisionBot(
+        rpc_url=rpc, vision_address=vision_addr,
+        private_key=_ANVIL_FAUCET_KEY,
+        data_node_url=cfg("DATA_NODE_URL"), oracles=[],
+    )
+    to = Web3.to_checksum_address(args.to)
+
+    def _send_raw(tx: dict, label: str) -> str:
+        signed = faucet_acct.sign_transaction(tx)
+        raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+        h = bot.w3.eth.send_raw_transaction(raw)
+        r = bot.w3.eth.wait_for_transaction_receipt(h, timeout=60)
+        hh = h.hex()
+        short = hh[:18]
+        print(f"  {label}: tx {short}… status {r.status}")
+        return hh
+
+    # Native gas
+    if args.eth > 0:
+        nonce = bot.w3.eth.get_transaction_count(faucet_acct.address)
+        _send_raw({
+            "from": faucet_acct.address, "to": to, "value": int(args.eth * 1e18),
+            "nonce": nonce, "gas": 21000, "gasPrice": bot.w3.eth.gas_price,
+            "chainId": bot.w3.eth.chain_id,
+        }, f"{args.eth} ETH → {to}")
+
+    # Mint L3 USDC
+    if args.usdc > 0:
+        mint_abi = [{
+            "inputs": [{"name": "to", "type": "address"},
+                       {"name": "amount", "type": "uint256"}],
+            "name": "mint", "outputs": [],
+            "stateMutability": "nonpayable", "type": "function",
+        }]
+        usdc = bot.w3.eth.contract(address=bot.usdc.address, abi=mint_abi)
+        nonce = bot.w3.eth.get_transaction_count(faucet_acct.address)
+        tx = usdc.functions.mint(to, int(args.usdc * 1e18)).build_transaction({
+            "from": faucet_acct.address, "nonce": nonce,
+            "gas": 120_000, "gasPrice": bot.w3.eth.gas_price,
+            "chainId": bot.w3.eth.chain_id,
+        })
+        _send_raw(tx, f"mint {args.usdc} USDC → {to}")
+
+    eth_bal = bot.w3.eth.get_balance(to) / 1e18
+    usdc_bal = bot.usdc.functions.balanceOf(to).call() / 1e18
+    print(f"  final: {to}  ETH {eth_bal:.4f}  USDC {usdc_bal:.4f}")
+
+
 def cmd_balance(args):
     from dotenv import dotenv_values
 
@@ -542,6 +604,15 @@ def main():
     p_fund.add_argument("--to", required=True, help="Recipient L3 address")
     p_fund.add_argument("--amount", type=float, required=True, help="USDC amount")
 
+    p_fct = sub.add_parser(
+        "faucet",
+        help="Seed a wallet from the L3 testnet faucet (mint USDC + send gas). "
+        "Uses the public anvil account index 1 key — valid only on this testnet.",
+    )
+    p_fct.add_argument("--to", required=True, help="Recipient L3 address")
+    p_fct.add_argument("--usdc", type=float, default=1.0, help="USDC amount to mint")
+    p_fct.add_argument("--eth", type=float, default=0.01, help="Native ETH to send for gas")
+
     p_bal = sub.add_parser(
         "balance", help="Print L3 USDC balance of each configured wallet."
     )
@@ -580,6 +651,8 @@ def main():
         cmd_gen_keys(args)
     elif args.cmd == "fund":
         cmd_fund(args)
+    elif args.cmd == "faucet":
+        cmd_faucet(args)
     elif args.cmd == "balance":
         cmd_balance(args)
 

@@ -8,23 +8,31 @@ A standalone trading bot for the Twitch source on Vision testnet (Index L3, chai
 
 The transport (bitmap encoding, `joinBatchDirect`, oracle quorum reveal, `PlayerSettled` settlement) must be byte-exact or the oracle silently rejects your deposit. The strategy is a swappable predictor: `momentum`, `rolling`, `xgb`, `ensemble`, `claude`.
 
-## Zero-to-trading in 5 minutes
+## Zero-to-trading — fully unattended
 
 ```bash
 git clone https://github.com/General-Market/vision-bot-examples
 cd vision-bot-examples/twitch
-./setup.sh
+./setup.sh --auto-fund        # ≈ 2 min; wallet is seeded from the L3 faucet
+.venv/bin/python live_trader.py --strategy momentum --deposit 0.1
 ```
 
-`setup.sh` is idempotent. It will:
+`setup.sh` is idempotent. With `--auto-fund` it:
 
-1. Detect Python ≥ 3.11 (macOS system 3.9 will not work — install Homebrew's `python@3.14`).
-2. Create `.venv`, install deps.
-3. Remind you to `brew install libomp` on macOS (xgboost dependency).
-4. Generate `BOT_PRIVATE_KEY` into `.env` if missing, print the derived address.
-5. Train a baseline XGBoost model (~200 assets × 24 h history, 1–3 min).
+1. Detects Python ≥ 3.11 (macOS system 3.9 won't work — install Homebrew's `python@3.14`).
+2. Creates `.venv`, installs deps (macOS: `brew install libomp` if xgboost needed).
+3. Generates `BOT_PRIVATE_KEY` into `.env` if missing.
+4. Calls `main.py faucet --to $BOT_ADDR --usdc 1 --eth 0.01` — seeds the wallet from the L3 testnet faucet (public anvil account index 1 with mint rights on L3 WUSDC).
 
-The script prints the bot's L3 wallet address at the end. **Fund that address with ≥ 0.5 L3 testnet USDC before running live.**
+Without `--auto-fund`, the script prints the address and tells the user to fund it themselves.
+
+Model training is NOT in setup. The live loop runs `momentum`/`rolling`/`contrarian`/`all_yes` out of the box — all feature-derived, zero model artifact needed. For `xgb`/`ensemble`/`claude`, run:
+
+```bash
+.venv/bin/python main.py train-xgb --hours 72 --max-assets 500 --out models/xgb.pkl
+```
+
+≈ 3 min. Produces a model with real edge (~0.5 pp lift, ~20 % flip-catch).
 
 ## Then trade
 

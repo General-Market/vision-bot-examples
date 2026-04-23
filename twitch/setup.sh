@@ -3,19 +3,35 @@
 #
 # What it does:
 #   1. Creates a Python 3.11+ venv and installs requirements.
-#   2. Generates a BOT_PRIVATE_KEY into .env if one doesn't exist.
-#   3. Prints the bot address and next steps.
+#   2. Generates BOT_PRIVATE_KEY into .env if one doesn't exist.
+#   3. Optionally funds the wallet from the L3 testnet faucet (--auto-fund).
+#   4. Prints the bot address and next steps.
 #
-# Model training is intentionally NOT part of setup — it is an extra
-# ~3 min step that users who want the `xgb` / `ensemble` strategies run
-# on demand:
+# Flags:
+#   --auto-fund    After key gen, seed the wallet with 0.01 ETH native +
+#                  1 USDC via the public L3 testnet faucet. Lets a fresh
+#                  agent go clone → trading-ready without manual funding.
+#
+# Model training is NOT part of setup — it is an extra ~3 min step for
+# users who want the `xgb` / `ensemble` strategies:
 #
 #     .venv/bin/python main.py train-xgb --hours 72 --max-assets 500 --out models/xgb.pkl
 #
 # Out-of-the-box strategies (momentum / rolling / contrarian / all_yes)
-# run without a trained model — feature-derived only.
+# run without a trained model.
 #
 # Idempotent: safe to re-run. Existing keys are preserved.
+
+AUTO_FUND=0
+for arg in "$@"; do
+    case "$arg" in
+        --auto-fund) AUTO_FUND=1 ;;
+        -h|--help)
+            sed -n '/^#!/,/^$/p' "$0" | sed 's/^# \?//'
+            exit 0
+            ;;
+    esac
+done
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -94,8 +110,6 @@ open(p,'w').write(s)
     info "→ fund with at least 0.5 L3 USDC before running live_trader.py"
 fi
 
-info ""
-info "${GRN}setup complete${NC}"
 BOT_ADDR=$(.venv/bin/python -c "
 import os
 from dotenv import load_dotenv
@@ -104,12 +118,28 @@ from eth_account import Account
 key = os.getenv('BOT_PRIVATE_KEY')
 if key: print(Account.from_key(key).address)
 ")
+
+if [ "$AUTO_FUND" = "1" ] && [ -n "$BOT_ADDR" ]; then
+    info "auto-funding ${BOT_ADDR} from the L3 testnet faucet"
+    .venv/bin/python main.py faucet --to "$BOT_ADDR" --usdc 1.0 --eth 0.01 || \
+        warn "faucet failed — fund manually before running live_trader.py"
+fi
+
+info ""
+info "${GRN}setup complete${NC}"
 info ""
 info "bot address : ${BOT_ADDR}"
 info "next steps  :"
-info "  1. Fund this address with L3 testnet USDC (≥ 0.5 USDC recommended)"
-info "  2. Sanity check:   .venv/bin/python main.py probe"
-info "  3. Dryrun:         .venv/bin/python main.py dryrun --strategy momentum"
-info "  4. Trade live:     .venv/bin/python live_trader.py --deposit 0.1 --strategy momentum"
-info "  5. (optional) Train the ML model — adds ~3 min, unlocks xgb / ensemble:"
-info "     .venv/bin/python main.py train-xgb --hours 72 --max-assets 500 --out models/xgb.pkl"
+if [ "$AUTO_FUND" != "1" ]; then
+    info "  1. Fund this address on L3 (either):"
+    info "       .venv/bin/python main.py faucet --to ${BOT_ADDR} --usdc 1"
+    info "       or transfer L3 USDC from your own funded wallet."
+    info "  2. Sanity check:   .venv/bin/python main.py probe"
+    info "  3. Dryrun:         .venv/bin/python main.py dryrun --strategy momentum"
+    info "  4. Trade live:     .venv/bin/python live_trader.py --strategy momentum --deposit 0.1"
+else
+    info "  1. Sanity check:   .venv/bin/python main.py probe"
+    info "  2. Trade live:     .venv/bin/python live_trader.py --strategy momentum --deposit 0.1"
+    info "  3. Watch PnL:      .venv/bin/python -c 'from pnl_logger import report; report(\"pnl.db\")'"
+fi
+info "  opt. train ML:       .venv/bin/python main.py train-xgb --hours 72 --max-assets 500 --out models/xgb.pkl"
