@@ -88,9 +88,12 @@ open(p,'w').write(s)
 fi
 
 if [ ! -f models/xgb.pkl ]; then
-    info "training baseline XGBoost model (may take 1–3 min)…"
+    info "training baseline XGBoost model (≈ 3 min)…"
     mkdir -p models
-    .venv/bin/python main.py train-xgb --hours 24 --max-assets 200 --out models/xgb.pkl
+    # 500 × 72 h produces ~560 k training rows, converges with real edge:
+    # lift_over_naive ≈ 0.5 pp, flip-catch ≈ 20%. For stronger edge, users
+    # can re-run `main.py train-xgb --hours 168 --max-assets 500`.
+    .venv/bin/python main.py train-xgb --hours 72 --max-assets 500 --out models/xgb.pkl
     info "model saved to models/xgb.pkl"
 else
     info "existing model found at models/xgb.pkl — skipping training"

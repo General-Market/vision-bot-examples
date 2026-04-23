@@ -370,6 +370,100 @@ def cmd_backtest(args):
     print(f"Backtest: {stats}")
 
 
+def cmd_gen_keys(args):
+    env_path = Path(__file__).parent / ".env"
+    env_text = env_path.read_text() if env_path.exists() else ""
+    new_lines = []
+    for tag in ("A", "B"):
+        var = f"BOT_PRIVATE_KEY_{tag}"
+        if f"\n{var}=" in "\n" + env_text and not env_text.rstrip().endswith(f"{var}="):
+            # Already present with value — skip. Print the address.
+            line = next(
+                (l for l in env_text.splitlines() if l.startswith(f"{var}=") and len(l) > len(var) + 2),
+                None,
+            )
+            if line:
+                key = line.split("=", 1)[1].strip()
+                addr = Account.from_key(key).address
+                print(f"{var} already set — address: {addr}")
+                continue
+        acct = Account.create()
+        key = acct.key.hex()
+        if not key.startswith("0x"):
+            key = "0x" + key
+        new_lines.append(f"{var}={key}")
+        print(f"{var} generated — address: {acct.address}")
+    if new_lines:
+        sep = "" if env_text.endswith("\n") or not env_text else "\n"
+        env_path.write_text(env_text + sep + "\n".join(new_lines) + "\n")
+        print(f"wrote {len(new_lines)} keys to {env_path}")
+
+
+def cmd_fund(args):
+    rpc = cfg("RPC_URL")
+    vision_addr = cfg("VISION_ADDRESS")
+    key = os.getenv("BOT_PRIVATE_KEY")
+    if not key:
+        print("BOT_PRIVATE_KEY required (the funding wallet)")
+        sys.exit(2)
+    bot = VisionBot(
+        rpc_url=rpc, vision_address=vision_addr, private_key=key,
+        data_node_url=cfg("DATA_NODE_URL"), oracles=[],
+    )
+    amount_wei = int(args.amount * 1e18)
+    bal = bot.usdc.functions.balanceOf(bot.bot_addr).call()
+    if bal < amount_wei:
+        print(f"insufficient balance: have {bal/1e18:.4f}, need {args.amount}")
+        sys.exit(3)
+    to = Web3.to_checksum_address(args.to)
+    tx = bot.usdc.functions.transfer(to, amount_wei).build_transaction({
+        "from": bot.bot_addr,
+        "nonce": bot.w3.eth.get_transaction_count(bot.bot_addr),
+        "gas": 120_000,
+        "gasPrice": bot.w3.eth.gas_price,
+        "chainId": bot.w3.eth.chain_id,
+    })
+    signed = bot.account.sign_transaction(tx)
+    raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+    h = bot.w3.eth.send_raw_transaction(raw)
+    receipt = bot.w3.eth.wait_for_transaction_receipt(h, timeout=120)
+    print(f"transfer {args.amount} USDC → {to}: tx {h.hex()} status {receipt.status}")
+
+
+def cmd_balance(args):
+    from dotenv import dotenv_values
+
+    rpc = cfg("RPC_URL")
+    vision_addr = cfg("VISION_ADDRESS")
+    env = dotenv_values(Path(__file__).parent / ".env")
+    keys_found = {}
+    for k, v in env.items():
+        if k.startswith("BOT_PRIVATE_KEY") and v:
+            try:
+                keys_found[k] = Account.from_key(v)
+            except Exception:
+                pass
+    if not keys_found:
+        print("No BOT_PRIVATE_KEY* entries in .env")
+        sys.exit(2)
+
+    bot = VisionBot(
+        rpc_url=rpc,
+        vision_address=vision_addr,
+        private_key=next(iter(keys_found.values())).key.hex(),
+        data_node_url=cfg("DATA_NODE_URL"),
+        oracles=[],
+    )
+    print(f"{'var':<22} {'address':<44} {'USDC':>12}")
+    for var, acct in keys_found.items():
+        try:
+            bal = bot.usdc.functions.balanceOf(acct.address).call()
+        except Exception as e:
+            print(f"{var:<22} {acct.address:<44} ERR {e}")
+            continue
+        print(f"{var:<22} {acct.address:<44} {bal/1e18:>12.4f}")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="vision-bot")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -430,6 +524,22 @@ def main():
         help="Cap on assets (0 = use all).",
     )
 
+    p_keys = sub.add_parser(
+        "gen-keys",
+        help="Generate BOT_PRIVATE_KEY_A/B for side-by-side racing. "
+        "Appends to .env if not already present; prints addresses.",
+    )
+
+    p_fund = sub.add_parser(
+        "fund", help="Transfer L3 USDC from BOT_PRIVATE_KEY to an address."
+    )
+    p_fund.add_argument("--to", required=True, help="Recipient L3 address")
+    p_fund.add_argument("--amount", type=float, required=True, help="USDC amount")
+
+    p_bal = sub.add_parser(
+        "balance", help="Print L3 USDC balance of each configured wallet."
+    )
+
     p_bt = sub.add_parser("backtest")
     p_bt.add_argument("--source", default="twitch")
     p_bt.add_argument("--hours", type=int, default=6)
@@ -460,6 +570,12 @@ def main():
         cmd_train_xgb(args)
     elif args.cmd == "backtest":
         cmd_backtest(args)
+    elif args.cmd == "gen-keys":
+        cmd_gen_keys(args)
+    elif args.cmd == "fund":
+        cmd_fund(args)
+    elif args.cmd == "balance":
+        cmd_balance(args)
 
 
 if __name__ == "__main__":

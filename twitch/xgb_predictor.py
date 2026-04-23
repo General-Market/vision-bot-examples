@@ -212,7 +212,7 @@ class XGBPredictor:
         Xtr, Xte, ytr, yte = X.iloc[:split], X.iloc[split:], y.iloc[:split], y.iloc[split:]
 
         model = XGBClassifier(
-            n_estimators=600,
+            n_estimators=1200,              # trust early-stopping to cut it short
             max_depth=4,
             learning_rate=0.05,
             subsample=0.8,
@@ -220,7 +220,7 @@ class XGBPredictor:
             min_child_weight=5,
             reg_alpha=0.1,
             reg_lambda=1.0,
-            early_stopping_rounds=30,
+            early_stopping_rounds=40,
             eval_metric="logloss",
             random_state=42,
         )

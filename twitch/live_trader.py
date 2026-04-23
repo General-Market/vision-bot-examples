@@ -86,8 +86,16 @@ def ensure_allowance(bot: VisionBot, target_wei: int) -> None:
         bot.approve_usdc(grant)
 
 
-def reconcile_unsettled(bot: VisionBot, ledger: PnLLedger, lookback_blocks: int = 50_000) -> None:
-    """Walk unsettled joins, check for PlayerSettled, stamp pnl."""
+_last_reconcile = 0.0
+
+
+def reconcile_unsettled(bot: VisionBot, ledger: PnLLedger, lookback_blocks: int = 50_000, min_interval_sec: int = 120) -> None:
+    """Walk unsettled joins, check for PlayerSettled, stamp pnl.
+    Throttled — scanning logs on every tick is expensive and redundant."""
+    global _last_reconcile
+    if time.time() - _last_reconcile < min_interval_sec:
+        return
+    _last_reconcile = time.time()
     unsettled = ledger.unsettled_since(int(time.time()) - 7 * 86400)
     if not unsettled:
         return

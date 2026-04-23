@@ -46,23 +46,32 @@ The loop is crash-resilient: any RPC hiccup, oracle timeout, or bad tick is logg
 
 ## Race two strategies
 
-The point of `live_trader.py` is to measure real PnL, not offline accuracy. Run two loops side by side with different strategies and different keys (or different DB paths) to directly compare:
+The point of `live_trader.py` is to measure real PnL, not offline accuracy. The repo ships a race harness:
 
 ```bash
-# Shell 1
-BOT_PRIVATE_KEY=<wallet-A> .venv/bin/python live_trader.py \
-    --deposit 0.1 --strategy ensemble --db pnl-ensemble.db
+# Generate two keys — appends BOT_PRIVATE_KEY_A/B to .env, prints addresses.
+.venv/bin/python main.py gen-keys
 
-# Shell 2
-BOT_PRIVATE_KEY=<wallet-B> .venv/bin/python live_trader.py \
-    --deposit 0.1 --strategy all_yes --db pnl-baseline.db
+# Fund both addresses with L3 USDC. If you have a primary funded wallet,
+# use the fund subcommand:
+BOT_PRIVATE_KEY=<funded-key> .venv/bin/python main.py fund \
+    --to 0xB168EF…  --amount 0.5
+BOT_PRIVATE_KEY=<funded-key> .venv/bin/python main.py fund \
+    --to 0xcbc70b…  --amount 0.5
 
-# Compare after some hours:
-.venv/bin/python -c 'from pnl_logger import report; report("pnl-ensemble.db")'
-.venv/bin/python -c 'from pnl_logger import report; report("pnl-baseline.db")'
+# Check balances:
+.venv/bin/python main.py balance
+
+# Start the race:
+./race.sh ensemble all_yes 0.1
+
+# Watch live PnL:
+.venv/bin/python race_report.py pnl-ensemble.db pnl-all_yes.db
 ```
 
-This is the only way to know whether the ML edge survives real parimutuel competition. Offline accuracy numbers (97%) are mostly stickiness; the edge is the 1.3 pp lift over the naive baseline, and whether that translates to USDC depends on who else is betting.
+`race.sh` spawns both `live_trader.py` processes in the background with separate DBs and logs under `logs/`. Ctrl-C stops both. `race_report.py` prints joins, settled, cumulative PnL, wagered, ROI, and the head-to-head difference.
+
+This is the only way to know whether the ML edge survives real parimutuel competition. Offline accuracy numbers (97%) are mostly stickiness; the real edge is ~0.5–1.3 pp of lift over the naive baseline, and whether that translates to USDC depends on who else is betting.
 
 ## Public infrastructure (no VPN)
 
@@ -93,6 +102,8 @@ twitch/
   backtest.py             walk-forward with flip/stuck split
   live_trader.py          production loop
   pnl_logger.py           SQLite ledger + report()
+  race.sh                 spawn two live_traders side by side
+  race_report.py          compare DBs, print head-to-head PnL
   main.py                 CLI: probe, dryrun, trade, train-xgb, backtest
   setup.sh                one-shot bootstrap
   abi/Vision.json         full Foundry ABI

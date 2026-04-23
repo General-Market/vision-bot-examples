@@ -9,3 +9,4 @@ __pycache__/
 # trained models — users train their own
 models/
 *.pkl
+pnl*.db
