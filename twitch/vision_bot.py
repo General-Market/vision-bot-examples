@@ -249,6 +249,6 @@ class VisionBot:
             from_block = max(0, latest - 100_000)
         logs = self.vision.events.PlayerSettled.get_logs(
             argument_filters={"batchId": batch_id, "player": self.bot_addr},
-            fromBlock=from_block,
+            from_block=from_block,
         )
         return int(logs[-1]["args"]["payout"]) if logs else 0

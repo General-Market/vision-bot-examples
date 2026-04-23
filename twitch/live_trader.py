@@ -112,7 +112,7 @@ def reconcile_unsettled(bot: VisionBot, ledger: PnLLedger, lookback_blocks: int 
         try:
             logs = bot.vision.events.PlayerSettled.get_logs(
                 argument_filters={"batchId": batch_id, "player": bot.bot_addr},
-                fromBlock=from_block,
+                from_block=from_block,
             )
         except Exception as e:
             log(f"  PlayerSettled scan failed for batch {batch_id}: {e}")
