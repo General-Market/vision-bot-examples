@@ -8,13 +8,23 @@ A standalone trading bot for the Twitch source on Vision testnet (Index L3, chai
 
 The transport (bitmap encoding, `joinBatchDirect`, oracle quorum reveal, `PlayerSettled` settlement) must be byte-exact or the oracle silently rejects your deposit. The strategy is a swappable predictor: `momentum`, `rolling`, `xgb`, `ensemble`, `claude`.
 
-## Zero-to-trading — fully unattended
+## Zero-to-trading — under 5 minutes, unattended
 
 ```bash
 git clone https://github.com/General-Market/vision-bot-examples
 cd vision-bot-examples/twitch
-./setup.sh --auto-fund        # ≈ 2 min; wallet is seeded from the L3 faucet
-.venv/bin/python live_trader.py --strategy momentum --deposit 0.1
+./setup.sh --auto-fund                                  # ≈ 90 s
+.venv/bin/python live_trader.py --strategy momentum --deposit 0.1 --max-joins 1
+```
+
+The bootstrap prints the generated wallet address in a banner at the end. `--max-joins 1` exits after the first real on-chain join (≈ 30 s). Total: **≈ 2.5 min** on a fresh machine.
+
+Want the heavy stack (XGBoost ensemble / Claude tiebreaker / backtest / train-xgb)? Add the ML extras separately — they're ~90 s of download on their own:
+
+```bash
+./setup.sh --auto-fund --with-ml                         # setup + ml in one go
+# or, after the fact:
+.venv/bin/pip install -r requirements-ml.txt
 ```
 
 `setup.sh` is idempotent. With `--auto-fund` it:
