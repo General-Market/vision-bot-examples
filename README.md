@@ -9,8 +9,10 @@ Each subdirectory is a standalone bot for one Vision source. **When no source is
 | Path | Source | Markets | Tick | Notes |
 |---|---|---|---|---|
 | [`twitch/`](./twitch) | `twitch` | ~8200 streamer + game viewership markets | 60 s | XGBoost + Claude + rolling ensemble |
+| [`polymarket/`](./polymarket) | `polymarket` | Polymarket events mirrored on Vision (`poly_*`) | 60 s | Same skeleton as `twitch/`. Different signal. |
+| [`visualizer/`](./visualizer) | — | shared local web app | — | React + Vite. Reads any bot's `pnl.json`, renders dashboard, asset list, price + PnL charts. |
 
-More sources incoming — polymarket mirror, crypto price thresholds, weather, others. The transport is source-agnostic; only the strategy layer cares.
+More sources incoming — crypto price thresholds, weather, others. The transport is source-agnostic; only the strategy layer cares.
 
 ## Zero-to-trading in under 3 minutes
 
