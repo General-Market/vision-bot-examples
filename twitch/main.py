@@ -71,16 +71,15 @@ def cmd_predict(args: argparse.Namespace) -> int:
     model.fit(X_scaled, y)
 
     predictor = TwitchHybridPredictor(
-        model=model,
+        ml_model=model,
         scaler=scaler,
         feature_names=feature_names,
-        engineer=engineer,
     )
     latest: pd.DataFrame = featured.tail(1)
     prediction = predictor.predict(
+        stream_features=latest,
         channel=channel,
-        question=question,
-        snapshot=latest,
+        market_question=question,
     )
     print(json.dumps(prediction, indent=2, default=str))
     return 0

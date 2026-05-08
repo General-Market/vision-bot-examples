@@ -1,96 +1,76 @@
-# polymarket — Vision-testnet trading bot
+# polymarket-vision-bot
 
-Trades the Polymarket source on Vision testnet (Index L3, chainId 111222333). Every market here is a Polymarket event whose midprice is fed on-chain via the General Market data-node.
+A trading bot for Polymarket-mirror markets on Vision testnet (Index L3 Orbit, chainId `111222333`). Combines three probability layers — Polymarket midprice as the external signal, Vision on-chain parimutuel pool prices, and a custom ML model with the Claude API for interpretation.
 
-**Source:** `polymarket` · prefixes `poly_*`. Tick 60 s. MIN_DEPOSIT 0.1 L3 USDC.
+Source: `polymarket` · prefixes `poly_*`.
 
-Sibling to [`twitch/`](../twitch/). Same skeleton, different signal — the bot pipeline is source-agnostic; only the data the data-node feeds it changes.
+Sibling to [`twitch/`](../twitch/). Same modular shape. Different signal universe — Polymarket Gamma + CLOB instead of Twitch Helix.
+
+## Prerequisites
+
+- Python 3.11+ (tested on 3.14)
+- macOS users: `brew install libomp` (xgboost depends on OpenMP)
+- An Anthropic API key (only for `--strategy claude` paths)
+- Optional: a funded testnet wallet for on-chain betting
+
+No Polymarket auth needed. Gamma + CLOB read endpoints are public.
 
 ## Setup
 
 ```bash
+git clone <repo> && cd polymarket
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+
 cp .env.example .env
-# optional: BOT_PRIVATE_KEY for `trade`, ANTHROPIC_API_KEY for `--strategy claude`
+# edit .env: ANTHROPIC_API_KEY (optional)
+# leave BOT_PRIVATE_KEY blank unless you want the bot to actually trade
 ```
 
-Python 3.11+. On macOS: `brew install libomp` (xgboost dependency).
-
-## Commands
+## Usage
 
 ```bash
-# Infra sanity check — no credentials needed.
-python main.py probe
+# Smoke test: verify imports and config
+python -m pytest tests/ -v
 
-# Dryrun: builds the join tx with a real strategy, prints it, exits.
-python main.py dryrun --strategy momentum --deposit 0.1
-python main.py dryrun --strategy xgb --history-hours 2
+# List active polymarket markets on Vision (read-only, no creds needed)
+python main.py markets
 
-# Train XGBoost on real history.
-python main.py train-xgb --hours 168 --max-assets 500 --out models/xgb.pkl
+# Predict a single market (needs ANTHROPIC_API_KEY for the Claude layer)
+python main.py predict --market-id 0x... \
+                       --question "Will candidate X win the primary?" \
+                       --category politics
 
-# Walk-forward backtest with flip/stuck breakdown.
-python main.py backtest --strategy xgb --hours 6 --max-assets 30
-
-# Real trade — signs and sends. Requires BOT_PRIVATE_KEY funded with L3 USDC.
-python main.py trade --strategy ensemble --deposit 0.1
+# Run the full daily pipeline (load → features → train → predict)
+python main.py pipeline
 ```
 
-## Pipeline
+## Architecture
 
-```
-snapshot + history ─→ features ─→ predictor ─→ scores ─→ picks ─→ bitmap ─→ joinBatchDirect
-                                                  (threshold)      (1024 B, keccak commitment)
-```
+| Layer | Purpose |
+|---|---|
+| `data/` | Polymarket Gamma loader, CLOB telemetry, cleaning, binary labeling |
+| `features/` | Rolling stats, market four factors, category ELO, fatigue, overlap, triple-layer divergence |
+| `vision/` | Index L3 RPC client, historical batch prices, order submission |
+| `models/` | LR, RF, XGBoost, soft-voting ensemble, hybrid predictor |
+| `evaluation/` | Walk-forward backtest, ablation, metrics |
+| `visualization/` | Confusion matrix, calibration, divergence scatter |
 
-Every predictor conforms to:
+The skeleton mirrors `twitch/` byte-for-byte at the layer level. `features/triple_layer.py` is identical between the two bots — pure math, source-agnostic. Only `data/` and the per-feature modules carry domain logic.
 
-```python
-predictor.predict(markets, snapshot_by_id) -> list[float]
-# positive score → UP likely, negative → DOWN likely
-```
+## Triple-layer prediction
 
-`picks_from_scores(scores, threshold=0.0)` binarises. The trading transport is predictor-agnostic — swap momentum for XGBoost for Claude without touching `encode_bitmap`.
+Each prediction blends three signals with weights chosen by Vision pool liquidity:
 
-## Strategies
+1. **ML** — XGBoost trained on settled Polymarket markets, features built from Gamma metadata + category aggregates.
+2. **External** — Polymarket midprice. The crowd's prior on the original venue.
+3. **Vision** — on-chain parimutuel pool ratios for the same market mirrored on Index L3.
 
-| `--strategy` | History? | ML? | Claude? | What it does |
-|---|:---:|:---:|:---:|---|
-| `all_yes` / `all_no` | — | — | — | Baselines. |
-| `momentum` | — | — | — | `changePct / 100`. |
-| `contrarian` | — | — | — | Fade the trend. |
-| `rolling` | ✓ | — | — | Weighted short-window changes. |
-| `xgb` | ✓ | ✓ | — | XGBoost classifier on resolution-aware labels. |
-| `ensemble` | ✓ | ✓ | optional | Weighted blend (default 50% rolling + 50% xgb). |
-| `claude` | ✓ | delegated | ✓ | Wraps a base; Claude overrides only the marginal picks. |
+Claude reads all three plus the KL divergence and emits an `adjusted_yes / adjusted_no` with confidence. The hybrid combines all four with liquidity-aware weights — high-liquidity Vision pools get 35% weight, thin pools fall back to ML + external.
 
-## Features
+## L3 Decimals
 
-Short-horizon only — tick is 60 s, longer windows don't predict next-tick:
-
-- `change_1m`, `change_5m`, `change_15m`
-- `vol_5m`, `slope_5m`, `streak`, `n_obs_5m`
-- `hour_utc`, `day_of_week`, `is_weekend`, `is_primetime`
-- `baseline_24h` (used only as resolution-rule input, not as a change feature)
-- `dist_to_up`, `dist_to_down` (signed distance to the market's threshold)
-- `category_mean_5m`, `asset_vs_category_5m` (cross-asset platform signal)
-- `current_change_pct`
-
-The signal looks the same as the Twitch bot's because the feature engine is. Polymarket midprices arrive as floats; viewer counts arrive as floats. The pipeline does not care which is which.
-
-## Labels
-
-**The oracle resolves against each market's threshold rule, not against direction.** Training on "did the value go up" teaches the wrong question.
-
-```python
-def compute_label(next_value, baseline_24h, resolution_type, threshold_bps):
-    frac = threshold_bps / 10000
-    if resolution_type == "up_x":    return int(next_value > baseline_24h * (1 + frac))
-    if resolution_type == "down_x":  return int(next_value < baseline_24h * (1 - frac))
-    if resolution_type == "up_0":    return int(next_value > 0)
-    if resolution_type == "flat_x":  return int(abs(next_value - baseline_24h) / abs(baseline_24h) < frac)
-```
+Vision batch pools use **18-decimal USDC** (L3 wrapped). Settlement-chain USDC is 6-decimal. Do not mix them. All pool-size conversions in this bot divide by `1e18`.
 
 ## Visualizer
 
@@ -105,14 +85,21 @@ pnpm dev
 
 Same SPA both bots feed. See [`../visualizer/README.md`](../visualizer/README.md).
 
-## The invariants
+## Known limitations
 
-1. Bitmap is always **1024 bytes**, MSB-first per byte. Shorter buffers hash wrong and reject.
-2. L3 USDC is **18 decimals**. `int(0.1 * 10**18)` for 0.1 USDC.
-3. MIN_DEPOSIT = 0.1 USDC (`1e17` wei). Lower joins revert.
-4. `config_hash` from `getBatch` is passed verbatim to `joinBatchDirect`.
-5. Bitmap reveal to oracles must follow the join tx confirmation.
-6. Pool totals are not queryable. Trade blind.
-7. `eth_getCode(vision_address)` must return non-empty before you trust a hard-coded address.
-8. USDC address is self-discovered via `vision.USDC()`.
-9. `probe` and `dryrun` auto-generate an ephemeral key if `BOT_PRIVATE_KEY` is unset.
+- The Vision ABI exposes batch metadata (`getBatch`, `currentTickId`, `joinBatchDirect`) but no YES/NO pool totals — parimutuel legs are off-chain in the bitmap layer. `get_market_price` returns the canonical shape but defaults pool values to 0.5/0.5 until the off-chain bitmap reader is integrated.
+- The Polymarket Gamma `closed=true` filter returns settled markets only. The walk-forward training universe is bounded by `LOOKBACK_DAYS` and `MAX_EVENTS_PER_CATEGORY` — set both honestly to avoid silent truncation.
+- Live midprice retrieval via `MarketTelemetry` rate-limits at the public CLOB throughput. For dense polling consider running your own CLOB mirror.
+
+## Testnet Safety
+
+Do not run with a non-empty `BOT_PRIVATE_KEY` unless the key holds testnet-only funds. The bot will submit real transactions to the configured RPC.
+
+## Retail-user smoke test (fresh clone)
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python -m pytest tests/ -v
+# Expected: 6 passed, 1 skipped (network test gated on POLYMARKET_NETWORK_TESTS)
+```
