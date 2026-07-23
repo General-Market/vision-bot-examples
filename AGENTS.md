@@ -4,165 +4,128 @@ Bootstrap instructions for a fresh agent picking up this repo. If you're reading
 
 ## What this repo is
 
-A standalone trading bot for the Twitch source on Vision testnet (Index L3, chainId `111222333`). Trades a ~8200-market parimutuel every 60 seconds. The model is XGBoost on short-horizon features with resolution-aware labels; a Claude-wrapped variant overrides marginal picks.
+Two reference prediction bots for Vision testnet (Index L3, chainId `111222333`), plus a shared local visualizer.
 
-The transport (bitmap encoding, `joinBatchDirect`, oracle quorum reveal, `PlayerSettled` settlement) must be byte-exact or the oracle silently rejects your deposit. The strategy is a swappable predictor: `momentum`, `rolling`, `xgb`, `ensemble`, `claude`.
+- `twitch/` — ~8200 streamer and game viewership markets, 60 s ticks.
+- `polymarket/` — Polymarket events mirrored on Vision under `poly_*`.
+- `visualizer/` — React + Vite SPA that reads either bot's `pnl.json`.
 
-## Zero-to-trading — under 5 minutes, unattended
+Both bots are the same skeleton with a different signal universe. The model is XGBoost on short-horizon features with resolution-aware labels; a Claude-wrapped layer interprets the divergence between the three probability sources.
+
+**These are prediction bots, not trading bots.** They read the chain, build features, train, and emit probabilities. Neither closes the loop: `VisionTrader.submit_bet` raises `NotImplementedError` because a YES/NO side cannot be turned into the bitmap commitment `joinBatchDirect` demands, and nothing here encodes bitmaps. `join_batch(...)` will sign a transaction if you compute `config_hash` and `bitmap_hash` yourself.
+
+## Layout
+
+Identical between the two bots:
+
+```
+<source>/
+  config/settings.py      all runtime config, env-overridable — SOURCE OF TRUTH
+                          for RPC, chain id, contract addresses, data-node URL
+  data/                   source loader, cleaner, telemetry, binary labelling
+  features/               rolling stats, four factors, ELO, fatigue, overlap,
+                          triple-layer divergence, Claude context features
+  models/                 LR / RF / XGBoost, soft-voting ensemble, hybrid
+                          predictor, prepare_model_data + train_and_evaluate
+  vision/                 read-only L3 client, historical batch prices, trader
+  evaluation/             walk-forward backtest, ablation, metrics
+  visualization/          confusion matrix, calibration, divergence scatter
+  abi/Vision.json         full Foundry ABI
+  main.py                 CLI: markets, predict, pipeline
+  pipeline.py             the daily orchestration behind `main.py pipeline`
+  tests/test_basic.py     smoke tests — 6 pass, 1 skips without credentials
+  requirements.txt
+  .env.example            mirrors config/settings.py defaults
+```
+
+`features/triple_layer.py` is byte-identical between the two bots. It is pure math and carries no domain logic. Only `data/` and the per-feature modules differ.
+
+## Bootstrap
 
 ```bash
 git clone https://github.com/General-Market/vision-bot-examples
 cd vision-bot-examples
-./setup.sh --auto-fund                                  # defaults to twitch
-.venv/bin/python twitch/live_trader.py --strategy momentum --deposit 0.1 --max-joins 1
-# After the join confirms, the bot verifies the data-node has indexed
-# the trade and opens https://generalmarket.io/profile/<wallet> in
-# your default browser. --no-open-portfolio to suppress.
+./setup.sh                                  # defaults to twitch
+./setup.sh --source polymarket              # the sibling bot
 ```
 
-**No source specified = twitch.** The repo-root `./setup.sh` forwards to `twitch/setup.sh`. Pass `--source <name>` (or `SOURCE=<name>`) when other bots ship.
+`setup.sh` is idempotent. It:
 
-Public portfolio lookup without running the trader:
+1. Finds a Python ≥ 3.11 on PATH (macOS system 3.9 will not work — `brew install python@3.14`).
+2. Creates `.venv` at the repo root and installs `<source>/requirements.txt`.
+3. Warns if xgboost cannot load — on macOS that means `brew install libomp`.
+4. Copies `<source>/.env.example` to `<source>/.env` if none exists. An existing `.env` is never touched.
+
+Then, from inside the bot directory:
 
 ```bash
-.venv/bin/python main.py portfolio                      # your wallet
-.venv/bin/python main.py portfolio --addr 0x…           # any address
+cd twitch
+../.venv/bin/python -m pytest tests/ -v      # expect: 6 passed, 1 skipped
+../.venv/bin/python main.py markets          # read-only, no credentials
+../.venv/bin/python main.py predict --channel xqc \
+    --question "Will xqc exceed 40k peak viewers tonight?"
+../.venv/bin/python main.py pipeline         # load -> features -> train -> predict
 ```
 
-Prints joins, settled ticks, PnL, ROI, win-rate, then opens the browser to `generalmarket.io/profile/<address>`.
+`markets` needs nothing. `predict` and `pipeline` need the source credentials in `.env` (`TWITCH_CLIENT_ID` + `TWITCH_APP_TOKEN` for twitch; nothing for polymarket, whose Gamma and CLOB read endpoints are public) plus `ANTHROPIC_API_KEY` for the Claude layer.
 
-The bootstrap prints the generated wallet address in a banner at the end. `--max-joins 1` exits after the first real on-chain join (≈ 30 s). Total: **≈ 2.5 min** on a fresh machine.
+Leave `BOT_PRIVATE_KEY` blank. With it blank both bots are strictly read-only and `VisionTrader` returns `{"status": "dryrun", ...}` instead of signing.
 
-Want the heavy stack (XGBoost ensemble / Claude tiebreaker / backtest / train-xgb)? Add the ML extras separately — they're ~90 s of download on their own:
+## Configuration — one source of truth
 
-```bash
-./setup.sh --auto-fund --with-ml                         # setup + ml in one go
-# or, after the fact:
-.venv/bin/pip install -r requirements-ml.txt
-```
+`<source>/config/settings.py` holds every default. `.env` overrides it. `.env.example` mirrors it. When they disagree, **settings.py wins and the others are the bug.**
 
-`setup.sh` is idempotent. With `--auto-fund` it:
+| | Value | Env var |
+|---|---|---|
+| L3 RPC | `http://142.132.164.24/` | `VISION_RPC_URL` |
+| Chain ID | `111222333` | `VISION_CHAIN_ID` |
+| Vision contract | `0x80Ab4ebDF79dEa442b54DECdcEd16D6654470544` | `VISION_ADDRESS` |
+| Index contract | `0xaBf79086293d30C8A72A0BE700a1c492F0Dd9D3a` | `INDEX_ADDRESS` |
+| L3 WUSDC | `0x2710e49EBb807A0cB9369F13Ba24Bd809809a827` | `L3_USDC_ADDRESS` |
+| Data-node | `https://api.generalmarket.io` | `DATA_NODE_URL` |
+| Twitch batch | `19` (tick 60 s) | `TWITCH_BATCH_ID` |
+| Polymarket batch | `0` = discover at runtime | `POLYMARKET_BATCH_ID` |
 
-1. Detects Python ≥ 3.11 (macOS system 3.9 won't work — install Homebrew's `python@3.14`).
-2. Creates `.venv`, installs deps (macOS: `brew install libomp` if xgboost needed).
-3. Generates `BOT_PRIVATE_KEY` into `.env` if missing.
-4. Calls `main.py faucet --to $BOT_ADDR --usdc 1 --eth 0.01` — seeds the wallet from the L3 testnet faucet (public anvil account index 1 with mint rights on L3 WUSDC).
-
-Without `--auto-fund`, the script prints the address and tells the user to fund it themselves.
-
-Model training is NOT in setup. The live loop runs `momentum`/`rolling`/`contrarian`/`all_yes` out of the box — all feature-derived, zero model artifact needed. For `xgb`/`ensemble`/`claude`, run:
-
-```bash
-.venv/bin/python main.py train-xgb --hours 72 --max-assets 500 --out models/xgb.pkl
-```
-
-≈ 3 min. Produces a model with real edge (~0.5 pp lift, ~20 % flip-catch).
-
-## Then trade
-
-```bash
-# Sanity check — no funds required.
-.venv/bin/python main.py probe
-
-# Dry run — builds the tx, prints it, doesn't sign.
-.venv/bin/python main.py dryrun --strategy ensemble
-
-# Live loop — signs, sends, reveals, logs PnL every 60s.
-.venv/bin/python live_trader.py --deposit 0.1 --strategy ensemble
-
-# In another terminal:
-.venv/bin/python -c 'from pnl_logger import report; report("pnl.db")'
-```
-
-The loop is crash-resilient: any RPC hiccup, oracle timeout, or bad tick is logged and skipped. Ctrl-C exits cleanly after the current iteration.
-
-## Race two strategies
-
-The point of `live_trader.py` is to measure real PnL, not offline accuracy. The repo ships a race harness:
-
-```bash
-# Generate two keys — appends BOT_PRIVATE_KEY_A/B to .env, prints addresses.
-.venv/bin/python main.py gen-keys
-
-# Fund both addresses with L3 USDC. If you have a primary funded wallet,
-# use the fund subcommand:
-BOT_PRIVATE_KEY=<funded-key> .venv/bin/python main.py fund \
-    --to 0xB168EF…  --amount 0.5
-BOT_PRIVATE_KEY=<funded-key> .venv/bin/python main.py fund \
-    --to 0xcbc70b…  --amount 0.5
-
-# Check balances:
-.venv/bin/python main.py balance
-
-# Start the race:
-./race.sh ensemble all_yes 0.1
-
-# Watch live PnL:
-.venv/bin/python race_report.py pnl-ensemble.db pnl-all_yes.db
-```
-
-`race.sh` spawns both `live_trader.py` processes in the background with separate DBs and logs under `logs/`. Ctrl-C stops both. `race_report.py` prints joins, settled, cumulative PnL, wagered, ROI, and the head-to-head difference.
-
-This is the only way to know whether the ML edge survives real parimutuel competition. Offline accuracy numbers (97%) are mostly stickiness; the real edge is ~0.5–1.3 pp of lift over the naive baseline, and whether that translates to USDC depends on who else is betting.
-
-## Public infrastructure (no VPN)
-
-| | URL |
-|---|---|
-| L3 RPC | `http://142.132.164.24/` |
-| Chain ID | `111222333` |
-| Vision contract | `0x94d540bb45975bd5a0c7ba9a15a0d34e378f6c61` |
-| L3 WUSDC | self-discovered via `vision.USDC()` |
-| Data-node (cached) | `https://generalmarket.io/bot-api` |
-| Oracles (3) | `http://116.203.156.98/oracle{1,2,3}` |
-
-The data-node path is a Varnish cache on VPS 3. Retail access to the origin data-node is firewalled — only the cache can reach it. Rate limit on the public path: 60 requests per minute per IP.
-
-## Key files
-
-```
-twitch/
-  bitmap.py               encode_bitmap + hash_bitmap (1024-byte padded keccak)
-  vision_bot.py           on-chain client: discover_source, find_active_batch_id,
-                          approve_usdc, join_batch, submit_bitmap, get_payout
-  history.py              bulk per-asset price history (data-node)
-  features.py             rolling features + resolution distance
-  xgb_predictor.py        vectorised training + inference
-  strategy.py             predictor registry; make_predictor_with_features
-  claude_predictor.py     Claude-as-tiebreaker wrapper
-  ensemble.py             weighted blend
-  backtest.py             walk-forward with flip/stuck split
-  live_trader.py          production loop
-  pnl_logger.py           SQLite ledger + report()
-  race.sh                 spawn two live_traders side by side
-  race_report.py          compare DBs, print head-to-head PnL
-  main.py                 CLI: probe, dryrun, trade, train-xgb, backtest
-  setup.sh                one-shot bootstrap
-  abi/Vision.json         full Foundry ABI
-  abi/ERC20.json          minimal approve/balanceOf
-```
+`visualizer/download.py` carries its own copy of the RPC and data-node values in `DEFAULTS`. Keep it in step with `settings.py`.
 
 ## The invariants — do not break
 
-1. Bitmap is always **1024 bytes**, MSB-first. Short buffers hash wrong → oracle rejects → deposit lost.
-2. L3 USDC has **18 decimals**. `int(0.1 * 10**18)`. Never `1e6`.
-3. `MIN_DEPOSIT = 1e17 wei = 0.1 USDC`. Lower joins revert.
-4. Bitmap reveal must follow the on-chain join confirmation. Revealing before = 404.
-5. `config_hash` from the on-chain `getBatch` is the one that goes into `joinBatchDirect` — not the data-node's recommended hash (they can differ during config rotation).
-6. USDC address is self-discovered via `vision.functions.USDC().call()`. The JSON files in the mono repo are stale.
-7. Pool totals are not queryable. You trade blind — edge comes from your model, not the book.
-8. Miss a tick rather than burn gas on a guaranteed revert. If `now + 10s > tick_end - lock_offset`, skip.
+1. **L3 USDC has 18 decimals.** `int(0.1 * 10**18)`. Never `1e6`. Every pool conversion here divides by `1e18`.
+2. **`MIN_DEPOSIT = 1e17 wei = 0.1 USDC`.** Lower joins revert.
+3. **The pick is a 1024-byte bitmap**, zero-padded, MSB-first, hashed to a commitment. Short buffers hash wrong — the batch keeps your deposit and records no pick. This repo does not encode bitmaps; you must.
+4. **`config_hash` comes from the on-chain `getBatch`**, not from the data-node's `/batches/recommended`. They diverge during config rotation, and only the on-chain value is accepted.
+5. **The USDC address is self-discoverable** via `vision.functions.USDC().call()`. Prefer it over any committed JSON when the two disagree — the chain is truth.
+6. **Pool totals are not queryable.** The ABI exposes `getBatch`, `currentTickId` and `joinBatchDirect` but no YES/NO totals — the parimutuel legs live off-chain in the bitmap layer. `get_market_price` returns the canonical shape with pools defaulted to 0.5/0.5 until an off-chain bitmap reader exists.
+
+## Visualizer
+
+```bash
+cd visualizer
+pnpm install                                  # Node 20+, pnpm 9+
+python download.py --pnl ../twitch/pnl.json --player 0xYourBotAddress
+pnpm dev                                      # http://localhost:5173
+pnpm typecheck && pnpm build
+```
+
+`download.py` writes `public/index.json` and `public/data/<batch_id>/<asset_id>.json` from the public data-node. Override the endpoints with `--data-node` / `--oracle` if you run your own node.
+
+## Honest status
+
+Every accuracy number in this repo — the 97%, the ~0.5 pp lift — is offline classification against historical data. Most of that 97% is stickiness: the naive "same as last tick" baseline is already very strong on viewership markets. No wallet has signed a real `joinBatchDirect` and observed `PlayerSettled`, so no claim about real parimutuel PnL is supported by anything here.
+
+Whether the offline edge survives real competition is unmeasured. Do not report it as though it were.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `getBatch failed: could not transact` | Vision address stale | Run `main.py probe`; confirm bytecode length > 0. Update `VISION_ADDRESS` from `/batches/recommended` response if needed. |
-| `data-node status=429` | Rate-limited on public cache | Throttle `FEATURE_REFRESH_SEC` up (default 900). Cache TTLs mean feature refreshes rarely need to hit origin. |
-| `Training set too small (0 rows)` | Too few assets × hours | Raise `--hours` or `--max-assets`. At least ~5000 rows needed. |
-| `97% training accuracy` | Probably leakage | Check FEATURE_COLS does not include `current_resolution`. |
-| `xgboost library could not be loaded` | macOS, no libomp | `brew install libomp` |
-| `TypeError: unsupported operand type(s) for |` | Python < 3.11 | Switch interpreter; see setup.sh |
+| `ModuleNotFoundError: No module named 'models'` | Old clone, whose `.gitignore` excluded `models/` source | Pull latest. The root `.gitignore` now ignores `*.pkl` artifacts, never the package. |
+| `TypeError: unsupported operand type(s) for \|` | Python < 3.11 | Use 3.11+; `setup.sh` picks the newest it finds. |
+| `xgboost library could not be loaded` | macOS, no OpenMP | `brew install libomp` |
+| `getBatch(N) failed: ... is contract deployed correctly` | `VISION_ADDRESS` has no bytecode on the configured RPC | Confirm `eth_getCode` is non-empty. Re-point `VISION_ADDRESS` or `VISION_RPC_URL`. |
+| `data-node status=429` | Rate-limited on the public cache | Back off. Cache TTLs mean feature refreshes rarely need the origin. |
+| `Training set too small (0 rows)` | Too few assets × lookback | Raise `LOOKBACK_DAYS` / `MAX_EVENTS_PER_CATEGORY`. Roughly 5000 rows needed. |
+| `97% training accuracy` | Probably leakage | Check the feature set does not carry `current_resolution`. |
 
 ## License
 
