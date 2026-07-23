@@ -6,7 +6,11 @@ __pycache__/
 *.pyo
 .pytest_cache/
 .DS_Store
-# trained models — users train their own
-models/
+# Trained model artifacts — users train their own. Ignore the artifacts,
+# never the `models/` package: `models/*.py` is bot source and a clean
+# clone fails at `from models import ...` without it.
 *.pkl
+*.joblib
 pnl*.db
+pnl.json
+logs/
