@@ -41,12 +41,12 @@ logging.basicConfig(
 log = logging.getLogger("viz")
 
 DEFAULTS = {
-    # Public General Market endpoints. The frontend at generalmarket.io
-    # proxies the data-node and oracle surfaces under /api/. Override with
-    # --data-node / --oracle if you run your own node locally.
-    "data_node": "https://generalmarket.io/api",
-    "oracle_urls": ["https://generalmarket.io/api"],
-    "rpc_url": "https://rpc.generalmarket.io/",
+    # Public General Market endpoints. These match the defaults in each bot's
+    # config/settings.py — keep the two in step. Override with --data-node /
+    # --oracle if you run your own node locally.
+    "data_node": "https://api.generalmarket.io",
+    "oracle_urls": ["https://api.generalmarket.io"],
+    "rpc_url": "http://142.132.164.24/",
     "pnl_file": "pnl.json",
 }
 
